@@ -5,6 +5,7 @@ from einops import rearrange, reduce, repeat
 from einops_exts import check_shape
 from ema_pytorch import EMA
 import pytorch_warmup as warmup
+
 from bitsandbytes.optim import Adam8bit, AdamW8bit, GlobalOptimManager
 from transformers.optimization import Adafactor
 
@@ -120,7 +121,7 @@ class SingleUnet(nn.Module):
             text_embed_dim, lambda: get_encoded_dim(text_encoder_name)
         )
 
-        # unet
+        # construct unet
         unet_device = next(unet.parameters()).device
         self.unet = unet.cast_model_parameters(
             lowres_cond=not (unet_num == 0),
@@ -333,6 +334,7 @@ class SingleUnet(nn.Module):
         text_masks=None,
         text_embeds=None,
         cond_images=None,
+        lowres_cond_images=None,
         batch_size=1,
         cond_scale=1.0,
         lowres_sample_noise_level=None,
@@ -367,17 +369,21 @@ class SingleUnet(nn.Module):
         )
 
         lowres_cond_img = lowres_noise_times = None
-        shape = (batch_size, self.sample_channels, self.image_size, self.image_size)
-        # disable lowres_cond for single unet training
-        current_lowres_cond = self.unet.lowres_cond
-        self.unet = self.unet.cast_model_parameters(
-            lowres_cond=False,
-            cond_on_text=self.unet.cond_on_text,
-            text_embed_dim=self.unet._locals["text_embed_dim"],
-            channels=self.unet.channels,
-            channels_out=self.unet.channels,
-            learned_sinu_pos_emb=self.unet.learned_sinu_pos_emb,
-        ).to(self.device)
+        shape = (batch_size, self.channels, self.image_size, self.image_size)
+        if self.unet.lowres_cond:
+            assert (
+                lowres_cond_images is not None
+            ), "lowres_cond_images must be passed in if lowres_cond is True"
+            lowres_noise_times = self.lowres_noise_schedule.get_times(
+                batch_size, lowres_sample_noise_level, device=device
+            )
+            lowres_cond_img = resize_image_to(lowres_cond_images, self.image_size)
+            lowres_cond_img, _ = self.lowres_noise_schedule.q_sample(
+                x_start=lowres_cond_img,
+                t=lowres_noise_times,
+                noise=torch.randn_like(lowres_cond_img),
+            )
+
         img = self.p_sample_loop(
             self.unet,
             shape,
@@ -391,14 +397,6 @@ class SingleUnet(nn.Module):
             pred_objective=self.pred_objective,
             dynamic_threshold=self.dynamic_thresholding,
         )
-        self.unet = self.unet.cast_model_parameters(
-            lowres_cond=current_lowres_cond,
-            cond_on_text=self.unet.cond_on_text,
-            text_embed_dim=self.unet._locals["text_embed_dim"],
-            channels=self.unet.channels,
-            channels_out=self.unet.channels,
-            learned_sinu_pos_emb=self.unet.learned_sinu_pos_emb,
-        ).to(self.device)
         outputs.append(img)
 
         if not return_pil_images:
@@ -845,10 +843,10 @@ class ElucidatedSingleUnet(nn.Module):
         text_masks=None,
         text_embeds=None,
         cond_images=None,
+        lowres_cond_images=None,
         batch_size=1,
         cond_scale=1.0,
         lowres_sample_noise_level=None,
-        return_all_unet_outputs=False,
         return_pil_images=False,
         device=None,
     ):
@@ -882,16 +880,20 @@ class ElucidatedSingleUnet(nn.Module):
 
         lowres_cond_img = lowres_noise_times = None
         shape = (batch_size, self.channels, self.image_size, self.image_size)
+        if self.unet.lowres_cond:
+            assert (
+                lowres_cond_images is not None
+            ), "lowres_cond_images must be passed in if lowres_cond is True"
+            lowres_noise_times = self.lowres_noise_schedule.get_times(
+                batch_size, lowres_sample_noise_level, device=device
+            )
+            lowres_cond_img = resize_image_to(lowres_cond_images, self.image_size)
+            lowres_cond_img, _ = self.lowres_noise_schedule.q_sample(
+                x_start=lowres_cond_img,
+                t=lowres_noise_times,
+                noise=torch.randn_like(lowres_cond_img),
+            )
 
-        current_lowres_cond = self.unet.lowres_cond
-        self.unet = self.unet.cast_model_parameters(
-            lowres_cond=False,
-            cond_on_text=self.unet.cond_on_text,
-            text_embed_dim=self.unet._locals["text_embed_dim"],
-            channels=self.unet.channels,
-            channels_out=self.unet.channels,
-            learned_sinu_pos_emb=self.unet.learned_sinu_pos_emb,
-        ).to(self.device)
         img = self.one_unet_sample(
             self.unet,
             shape,
@@ -904,15 +906,6 @@ class ElucidatedSingleUnet(nn.Module):
             lowres_noise_times=lowres_noise_times,
             dynamic_threshold=self.dynamic_thresholding,
         )
-        self.unet = self.unet.cast_model_parameters(
-            lowres_cond=current_lowres_cond,
-            cond_on_text=self.unet.cond_on_text,
-            text_embed_dim=self.unet._locals["text_embed_dim"],
-            channels=self.unet.channels,
-            channels_out=self.unet.channels,
-            learned_sinu_pos_emb=self.unet.learned_sinu_pos_emb,
-        ).to(self.device)
-
         outputs.append(img)
 
         if not return_pil_images:
