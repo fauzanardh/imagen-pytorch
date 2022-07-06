@@ -5,10 +5,12 @@ from einops import rearrange, reduce, repeat
 from einops_exts import check_shape
 from ema_pytorch import EMA
 import pytorch_warmup as warmup
+from bitsandbytes.optim import Adam8bit, AdamW8bit, GlobalOptimManager
+from transformers.optimization import Adafactor
 
 import torch
 from torch import nn
-from torch.optim import Adam
+from torch.optim import Adam, AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.cuda.amp import autocast, GradScaler
 import torch.nn.functional as F
@@ -1052,6 +1054,7 @@ class SingleUnetTrainer(nn.Module):
         group_wd_params=True,
         warmup_steps=None,
         cosine_decay_max_steps=None,
+        optimizer="adam",
         **kwargs,
     ):
         super().__init__()
@@ -1065,14 +1068,60 @@ class SingleUnetTrainer(nn.Module):
 
         self.amp = amp
 
-        optimizer = Adam(
-            single_unet.unet.parameters(),
-            lr=lr,
-            eps=eps,
-            betas=(beta1, beta2),
-            **kwargs,
-        )
-        self.optim = optimizer
+        if optimizer == "adam":
+            optim = Adam(
+                single_unet.unet.parameters(),
+                lr=lr,
+                eps=eps,
+                betas=(beta1, beta2),
+                **kwargs,
+            )
+        elif optimizer == "adamw":
+            optim = AdamW(
+                single_unet.unet.parameters(),
+                lr=lr,
+                eps=eps,
+                betas=(beta1, beta2),
+                **kwargs,
+            )
+        elif optimizer == "adam8bit":
+            optim = Adam8bit(
+                single_unet.unet.parameters(),
+                lr=lr,
+                eps=eps,
+                betas=(beta1, beta2),
+                **kwargs,
+            )
+            for module in single_unet.unet.modules():
+                if isinstance(module, nn.Embedding):
+                    GlobalOptimManager.get_instance().register_module_override(
+                        module, "weight", {"optim_bits": 32}
+                    )
+        elif optimizer == "adamw8bit":
+            optim = AdamW8bit(
+                single_unet.unet.parameters(),
+                lr=lr,
+                eps=eps,
+                betas=(beta1, beta2),
+                **kwargs,
+            )
+            for module in single_unet.unet.modules():
+                if isinstance(module, nn.Embedding):
+                    GlobalOptimManager.get_instance().register_module_override(
+                        module, "weight", {"optim_bits": 32}
+                    )
+        elif optimizer == "adafactor":
+            optim = Adafactor(
+                single_unet.unet.parameters(),
+                lr=lr,
+                eps=eps,
+                beta1=beta1,
+                **kwargs,
+            )
+        else:
+            raise NotImplementedError(f"optimizer {optimizer} not implemented")
+
+        self.optim = optim
 
         if self.use_ema:
             self.ema_unet = EMA(single_unet.unet, **ema_kwargs)
