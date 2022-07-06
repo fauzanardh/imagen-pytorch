@@ -1,6 +1,6 @@
 from math import sqrt
 from pathlib import Path
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from einops import rearrange, reduce, repeat
 from einops_exts import check_shape
 from ema_pytorch import EMA
