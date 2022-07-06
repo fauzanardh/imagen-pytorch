@@ -9,4 +9,15 @@ from imagen_pytorch.elucidated_imagen import ElucidatedImagen
 
 # config driven creation of imagen instances
 
-from imagen_pytorch.configs import UnetConfig, ImagenConfig, ElucidatedImagenConfig, ImagenTrainerConfig
+from imagen_pytorch.configs import (
+    UnetConfig,
+    ImagenConfig,
+    ElucidatedImagenConfig,
+    ImagenTrainerConfig,
+)
+
+from imagen_pytorch.trainer_single_unet import (
+    SingleUnet,
+    ElucidatedSingleUnet,
+    SingleUnetTrainer,
+)
