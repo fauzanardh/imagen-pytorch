@@ -287,7 +287,7 @@ Not at the moment but one will likely be trained and open sourced within the yea
 
 - <a href="https://github.com/marunine">Marunine</a> for providing a <a href="https://github.com/lucidrains/imagen-pytorch/issues/72#issuecomment-1163275757">potential solution</a> for a color shifting issue in the memory efficient u-nets. Thanks to <a href="https://github.com/jacobwjs">Jacob</a> for sharing experimental comparisons between the base and memory-efficient unets
 
-- <a href="https://github.com/marunine">Marunine</a> for finding numerous bugs, and for sharing his experimental configurations and results
+- <a href="https://github.com/marunine">Marunine</a> for finding numerous bugs, resolving an issue with resize right, and for sharing his experimental configurations and results
 
 - <a href="https://github.com/KhrulkovV">Valentin</a> for pointing out insufficient skip connections in the unet, as well as the specific method of attention conditioning in the base-unet in the appendix
 
@@ -327,6 +327,7 @@ Not at the moment but one will likely be trained and open sourced within the yea
 - [ ] extend to video generation, using axial time attention as in Ho's video ddpm paper + https://github.com/lucidrains/flexible-diffusion-modeling-videos-pytorch for up to 25 minute video
 - [ ] add inpainting ability using resampler from repaint paper https://arxiv.org/abs/2201.09865
 - [ ] consider unet with attention mediating skip connections https://arxiv.org/abs/2109.04335
+- [ ] if memory efficient unet is defective, consider https://arxiv.org/abs/1906.06148
 
 ## Citations
 

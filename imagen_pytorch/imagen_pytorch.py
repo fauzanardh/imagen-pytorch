@@ -109,14 +109,19 @@ def masked_mean(t, *, dim, mask = None):
 
     return masked_t.sum(dim = dim) / denom.clamp(min = 1e-5)
 
-def resize_image_to(image, target_image_size):
+def resize_image_to(image, target_image_size, clamp_range = None):
     orig_image_size = image.shape[-1]
 
     if orig_image_size == target_image_size:
         return image
 
     scale_factors = target_image_size / orig_image_size
-    return resize(image, scale_factors = scale_factors)
+    out = resize(image, scale_factors = scale_factors)
+
+    if exists(clamp_range):
+        out = out.clamp(*clamp_range)
+
+    return out
 
 # image normalization functions
 # ddpms expect images to be in the range of -1 to 1
@@ -1313,6 +1318,44 @@ class Unet(nn.Module):
 
         return self.__class__(**{**self._locals, **updated_kwargs})
 
+    # methods for returning the full unet config as well as its parameter state
+
+    def to_config_and_state_dict(self):
+        return self._locals, self.state_dict()
+
+    # class method for rehydrating the unet from its config and state dict
+
+    @classmethod
+    def from_config_and_state_dict(klass, config, state_dict):
+        unet = klass(**config)
+        unet.load_state_dict(state_dict)
+        return unet
+
+    # methods for persisting unet to disk
+
+    def persist_to_file(self, path):
+        path = Path(path)
+        path.parents[0].mkdir(exist_ok = True, parents = True)
+
+        config, state_dict = self.to_config_and_state_dict()
+        pkg = dict(config = config, state_dict = state_dict)
+        torch.save(pkg, str(path))
+
+    # class method for rehydrating the unet from file saved with `persist_to_file`
+
+    @classmethod
+    def hydrate_from_file(klass, path):
+        path = Path(path)
+        assert path.exists()
+        pkg = torch.load(str(path))
+
+        assert 'config' in pkg and 'state_dict' in pkg
+        config, state_dict = pkg['config'], pkg['state_dict']
+
+        return Unet.from_config_and_state_dict(config, state_dict)
+
+    # forward with classifier free guidance
+
     def forward_with_cond_scale(
         self,
         *args,
@@ -1405,6 +1448,9 @@ class Unet(nn.Module):
             text_tokens = self.text_to_cond(text_embeds)
 
             text_tokens = text_tokens[:, :self.max_text_len]
+            
+            if exists(text_mask):
+                text_mask = text_mask[:, :self.max_text_len]
 
             text_tokens_len = text_tokens.shape[1]
             remainder = self.max_text_len - text_tokens_len
@@ -1687,6 +1733,7 @@ class Imagen(nn.Module):
 
         self.normalize_img = normalize_neg_one_to_one if auto_normalize_img else identity
         self.unnormalize_img = unnormalize_zero_to_one if auto_normalize_img else identity
+        self.input_image_range = (0. if auto_normalize_img else -1., 1.)
 
         # dynamic thresholding
 
@@ -1983,8 +2030,8 @@ class Imagen(nn.Module):
 
         lowres_cond_img = lowres_aug_times = None
         if exists(prev_image_size):
-            lowres_cond_img = resize_image_to(images, prev_image_size)
-            lowres_cond_img = resize_image_to(lowres_cond_img, target_image_size)
+            lowres_cond_img = resize_image_to(images, prev_image_size, clamp_range = self.input_image_range)
+            lowres_cond_img = resize_image_to(lowres_cond_img, target_image_size, clamp_range = self.input_image_range)
 
             if self.per_sample_random_aug_noise_level:
                 lowres_aug_times = self.lowres_noise_schedule.sample_random_times(b, device = device)
