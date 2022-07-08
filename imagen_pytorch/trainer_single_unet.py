@@ -1162,6 +1162,12 @@ class SingleUnetTrainer(nn.Module):
 
         self.to(next(single_unet.parameters()).device)
 
+        self.register_buffer("_temp", torch.tensor([0.0]), persistent=False)
+
+    @property
+    def device(self):
+        return self._temp.device
+
     def save(self, path, overwrite=True, **kwargs):
         path = Path(path)
         assert not (path.exists() and not overwrite)
