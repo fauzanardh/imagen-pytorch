@@ -109,14 +109,14 @@ def masked_mean(t, *, dim, mask = None):
 
     return masked_t.sum(dim = dim) / denom.clamp(min = 1e-5)
 
-def resize_image_to(image, target_image_size, clamp_range = None):
+def resize_image_to(image, target_image_size, clamp_range = None, pad_mode = 'constant'):
     orig_image_size = image.shape[-1]
 
     if orig_image_size == target_image_size:
         return image
 
     scale_factors = target_image_size / orig_image_size
-    out = resize(image, scale_factors = scale_factors)
+    out = resize(image, scale_factors = scale_factors, pad_mode = pad_mode)
 
     if exists(clamp_range):
         out = out.clamp(*clamp_range)
@@ -1626,6 +1626,7 @@ class Imagen(nn.Module):
         p2_loss_weight_k = 1,
         dynamic_thresholding = True,
         dynamic_thresholding_percentile = 0.9,      # unsure what this was based on perusal of paper
+        only_train_unet_number = None
     ):
         super().__init__()
 
@@ -1693,6 +1694,9 @@ class Imagen(nn.Module):
         # construct unets
 
         self.unets = nn.ModuleList([])
+
+        self.unet_being_trained_index = -1 # keeps track of which unet is being trained at the moment
+        self.only_train_unet_number = only_train_unet_number
 
         for ind, one_unet in enumerate(unets):
             assert isinstance(one_unet, Unet)
@@ -1762,25 +1766,53 @@ class Imagen(nn.Module):
     def get_unet(self, unet_number):
         assert 0 < unet_number <= len(self.unets)
         index = unet_number - 1
+
+        if isinstance(self.unets, nn.ModuleList):
+            unets_list = [unet for unet in self.unets]
+            delattr(self, 'unets')
+            self.unets = unets_list
+
+        if index != self.unet_being_trained_index:
+            for unet_index, unet in enumerate(self.unets):
+                unet.to(self.device if unet_index == index else 'cpu')
+
+        self.unet_being_trained_index = index
         return self.unets[index]
+
+    def reset_unets_all_one_device(self, device = None):
+        device = default(device, self.device)
+        self.unets = nn.ModuleList([*self.unets])
+        self.unets.to(device)
+
+        self.unet_being_trained_index = -1
 
     @contextmanager
     def one_unet_in_gpu(self, unet_number = None, unet = None):
         assert exists(unet_number) ^ exists(unet)
 
         if exists(unet_number):
-            unet = self.get_unet(unet_number)
-
-        self.cuda()
+            unet = self.unets[unet_number - 1]
 
         devices = [module_device(unet) for unet in self.unets]
         self.unets.cpu()
-        unet.cuda()
+        unet.to(self.device)
 
         yield
 
         for unet, device in zip(self.unets, devices):
             unet.to(device)
+
+    # overriding state dict functions
+
+    def state_dict(self, *args, **kwargs):
+        self.reset_unets_all_one_device()
+        return super().state_dict(*args, **kwargs)
+
+    def load_state_dict(self, *args, **kwargs):
+        self.reset_unets_all_one_device()
+        return super().load_state_dict(*args, **kwargs)
+
+    # gaussian diffusion methods
 
     def p_mean_variance(self, unet, x, t, *, noise_scheduler, text_embeds = None, text_mask = None, cond_images = None, lowres_cond_img = None, lowres_noise_times = None, cond_scale = 1., model_output = None, t_next = None, pred_objective = 'noise', dynamic_threshold = True):
         assert not (cond_scale != 1. and not self.can_classifier_guidance), 'imagen was not trained with conditional dropout, and thus one cannot use classifier free guidance (cond_scale anything other than 1)'
@@ -1869,6 +1901,7 @@ class Imagen(nn.Module):
         device = None,
     ):
         device = default(device, lambda: next(self.parameters()).device)
+        self.reset_unets_all_one_device(device = device)
 
         if exists(texts) and not exists(text_embeds) and not self.unconditional:
             text_embeds, text_masks = t5_encode_text(texts, name = self.text_encoder_name)
@@ -1899,7 +1932,7 @@ class Imagen(nn.Module):
                 if unet.lowres_cond:
                     lowres_noise_times = self.lowres_noise_schedule.get_times(batch_size, lowres_sample_noise_level, device = device)
 
-                    lowres_cond_img = resize_image_to(img, image_size)
+                    lowres_cond_img = resize_image_to(img, image_size, pad_mode = 'reflect')
                     lowres_cond_img, _ = self.lowres_noise_schedule.q_sample(x_start = lowres_cond_img, t = lowres_noise_times, noise = torch.randn_like(lowres_cond_img))
 
                 shape = (batch_size, self.channels, image_size, image_size)
@@ -2001,6 +2034,8 @@ class Imagen(nn.Module):
     ):
         assert not (len(self.unets) > 1 and not exists(unet_number)), f'you must specify which unet you want trained, from a range of 1 to {len(self.unets)}, if you are training cascading DDPM (multiple unets)'
         unet_number = default(unet_number, 1)
+        assert not exists(self.only_train_unet_number) or self.only_train_unet_number == unet_number, 'you can only train on unet #{self.only_train_unet_number}'
+
         unet_index = unet_number - 1
         
         unet = self.get_unet(unet_number)
@@ -2030,8 +2065,8 @@ class Imagen(nn.Module):
 
         lowres_cond_img = lowres_aug_times = None
         if exists(prev_image_size):
-            lowres_cond_img = resize_image_to(images, prev_image_size, clamp_range = self.input_image_range)
-            lowres_cond_img = resize_image_to(lowres_cond_img, target_image_size, clamp_range = self.input_image_range)
+            lowres_cond_img = resize_image_to(images, prev_image_size, clamp_range = self.input_image_range, pad_mode = 'reflect')
+            lowres_cond_img = resize_image_to(lowres_cond_img, target_image_size, clamp_range = self.input_image_range, pad_mode = 'reflect')
 
             if self.per_sample_random_aug_noise_level:
                 lowres_aug_times = self.lowres_noise_schedule.sample_random_times(b, device = device)
