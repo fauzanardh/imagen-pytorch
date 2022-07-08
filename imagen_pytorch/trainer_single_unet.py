@@ -155,6 +155,7 @@ class SingleUnet(nn.Module):
         self.unnormalize_img = (
             unnormalize_zero_to_one if auto_normalize_img else identity
         )
+        self.input_image_range = (0.0 if auto_normalize_img else -1.0, 1.0)
 
         # dynamic thresholding
         self.dynamic_thresholding = dynamic_thresholding
@@ -377,7 +378,9 @@ class SingleUnet(nn.Module):
             lowres_noise_times = self.lowres_noise_schedule.get_times(
                 batch_size, lowres_sample_noise_level, device=device
             )
-            lowres_cond_img = resize_image_to(lowres_cond_images, self.image_size)
+            lowres_cond_img = resize_image_to(
+                lowres_cond_images, self.image_size, pad_mode="reflect"
+            )
             lowres_cond_img, _ = self.lowres_noise_schedule.q_sample(
                 x_start=lowres_cond_img,
                 t=lowres_noise_times,
@@ -524,8 +527,18 @@ class SingleUnet(nn.Module):
 
         lowres_cond_img = lowres_aug_times = None
         if exists(prev_image_size):
-            lowres_cond_img = resize_image_to(images, prev_image_size)
-            lowres_cond_img = resize_image_to(lowres_cond_img, target_image_size)
+            lowres_cond_img = resize_image_to(
+                images,
+                prev_image_size,
+                clamp_range=self.input_image_range,
+                pad_mode="reflect",
+            )
+            lowres_cond_img = resize_image_to(
+                lowres_cond_img,
+                target_image_size,
+                clamp_range=self.input_image_range,
+                pad_mode="reflect",
+            )
 
             if self.per_sample_random_aug_noise_level:
                 lowres_aug_times = self.lowres_noise_schedule.sample_random_times(
@@ -634,6 +647,7 @@ class ElucidatedSingleUnet(nn.Module):
         self.unnormalize_img = (
             unnormalize_zero_to_one if auto_normalize_img else identity
         )
+        self.input_image_range = (0.0 if auto_normalize_img else -1.0, 1.0)
 
         # dynamic thresholding
         self.dynamic_thresholding = dynamic_thresholding
@@ -887,7 +901,9 @@ class ElucidatedSingleUnet(nn.Module):
             lowres_noise_times = self.lowres_noise_schedule.get_times(
                 batch_size, lowres_sample_noise_level, device=device
             )
-            lowres_cond_img = resize_image_to(lowres_cond_images, self.image_size)
+            lowres_cond_img = resize_image_to(
+                lowres_cond_images, self.image_size, pad_mode="reflect"
+            )
             lowres_cond_img, _ = self.lowres_noise_schedule.q_sample(
                 x_start=lowres_cond_img,
                 t=lowres_noise_times,
@@ -969,8 +985,18 @@ class ElucidatedSingleUnet(nn.Module):
 
         lowres_cond_img = lowres_aug_times = None
         if exists(prev_image_size):
-            lowres_cond_img = resize_image_to(images, prev_image_size)
-            lowres_cond_img = resize_image_to(lowres_cond_img, target_image_size)
+            lowres_cond_img = resize_image_to(
+                images,
+                prev_image_size,
+                clamp_range=self.input_image_range,
+                pad_mode="reflect",
+            )
+            lowres_cond_img = resize_image_to(
+                lowres_cond_img,
+                target_image_size,
+                clamp_range=self.input_image_range,
+                pad_mode="reflect",
+            )
 
             if self.per_sample_random_aug_noise_level:
                 lowres_aug_times = self.lowres_noise_schedule.sample_random_times(
