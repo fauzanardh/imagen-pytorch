@@ -206,7 +206,7 @@ unet1 = Unet(
     dim_mults = (1, 2, 4),
     num_resnet_blocks = 3,
     layer_attns = (False, True, True),
-    layer_cross_attns = (False, True, True),
+    layer_cross_attns = False,
     use_linear_attn = True
 )
 
@@ -215,7 +215,7 @@ unet2 = SRUnet256(
     dim_mults = (1, 2, 4),
     num_resnet_blocks = (2, 4, 8),
     layer_attns = (False, False, True),
-    layer_cross_attns = (False, False, True)
+    layer_cross_attns = False
 )
 
 # imagen, which contains the unets above (base unet and super resoluting ones)
@@ -255,6 +255,57 @@ trainer.save('./path/to/checkpoint.pt')
 trainer.load('./path/to/checkpoint.pt')
 
 trainer.steps # (2,) step number for each of the unets, in this case 2
+```
+
+## Dataloader
+
+You can also rely on the `ImagenTrainer` to automatically train off `DataLoader` instances. You simply have to craft your `DataLoader` to return either `images` (for unconditional case), or of `('images', 'text_embeds', 'text_masks')` for text-guided generation.
+
+ex. unconditional training
+
+```python
+import torch
+from imagen_pytorch import Unet, Imagen, ImagenTrainer
+from imagen_pytorch.data import get_images_dataloader
+
+# unets for unconditional imagen
+
+unet = Unet(
+    dim = 32,
+    dim_mults = (1, 2, 4),
+    num_resnet_blocks = 3,
+    layer_attns = (False, True, True),
+    layer_cross_attns = False,
+    use_linear_attn = True
+)
+
+# imagen, which contains the unets above (base unet and super resoluting ones)
+
+imagen = Imagen(
+    condition_on_text = False,   # this must be set to False for unconditional Imagen
+    unets = (unet,),
+    image_sizes = (128,),
+    timesteps = 1000
+)
+
+trainer = ImagenTrainer(imagen).cuda()
+
+# instantiate your dataloader, which returns the necessary inputs to the DDPM as tuple in the order of images, text embeddings, then text masks. in this case, only images is returned as it is unconditional training
+
+train_dl = get_images_dataloader('/path/to/train/images', batch_size = 4, image_size = 128)
+
+trainer.add_train_dataloader(train_dl)
+
+# train each unet in concert, or separately (recommended) to completion
+
+for i in range(200000):
+    loss = trainer.train_step(unet_number = 1)
+    print(f'loss: {loss}')
+
+# do the above for many many many many steps
+# now you can sample images unconditionally from the cascading unet(s)
+
+images = trainer.sample(batch_size = 4, max_batch_size = 1) # (4, 3, 128, 128)
 ```
 
 ## Experimental
@@ -334,13 +385,15 @@ Not at the moment but one will likely be trained and open sourced within the yea
 - [x] make sure cascading ddpm can be trained without text condition, and make sure both continuous and discrete time gaussian diffusion works
 - [x] use primer's depthwise convs on the qkv projections in linear attention (or use token shifting before projections) - also use new dropout proposed by bayesformer, as it seems to work well with linear attention
 - [x] explore skip layer excitation in unet decoder
-- [ ] pytorch lightning integration
+- [ ] accelerate integration
 - [ ] preencoding of text to memmapped embeddings
 - [ ] build out CLI tool for training, resuming training, and one-line generation of image
 - [ ] extend to video generation, using axial time attention as in Ho's video ddpm paper + https://github.com/lucidrains/flexible-diffusion-modeling-videos-pytorch for up to 25 minute video
 - [ ] add inpainting ability using resampler from repaint paper https://arxiv.org/abs/2201.09865
 - [ ] consider unet with attention mediating skip connections https://arxiv.org/abs/2109.04335
 - [ ] if memory efficient unet is defective, consider https://arxiv.org/abs/1906.06148
+- [ ] be able to create dataloader iterators based on the old epoch style, also configure shuffling etc
+- [ ] be able to also pass in arguments (instead of requiring forward to be all keyword args on model)
 
 ## Citations
 
