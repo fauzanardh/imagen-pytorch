@@ -37,7 +37,7 @@ from imagen_pytorch.t5 import DEFAULT_T5_NAME, get_encoded_dim, t5_encode_text
 from imagen_pytorch.imagen_pytorch import default
 from imagen_pytorch.trainer import (
     exists,
-    null_context,
+    nullcontext,
     groupby_prefix_and_trim,
     cast_torch_tensor,
     split_args_and_kwargs,
@@ -1236,7 +1236,7 @@ class SingleUnetTrainer(nn.Module):
             self.ema_unet.update()
 
         maybe_warmup_context = (
-            null_context()
+            nullcontext()
             if not exists(self.warmup_scheduler)
             else self.warmup_scheduler.dampening()
         )
