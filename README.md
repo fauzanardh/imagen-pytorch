@@ -30,6 +30,8 @@ Please join <a href="https://discord.gg/xBPBXfcFHd"><img alt="Join us on Discord
 
 - <a href="https://github.com/marunine">Marunine</a> for finding numerous bugs, resolving an issue with resize right, and for sharing his experimental configurations and results
 
+- <a href="https://github.com/MalumaDev">MalumaDev</a> for proposing the use of pixel shuffle upsampler to fix checkboard artifacts
+
 - <a href="https://github.com/KhrulkovV">Valentin</a> for pointing out insufficient skip connections in the unet, as well as the specific method of attention conditioning in the base-unet in the appendix
 
 - <a href="https://github.com/BIGJUN777">BIGJUN</a> for catching a big bug with continuous time gaussian diffusion noise level conditioning at inference time
@@ -80,13 +82,12 @@ imagen = Imagen(
 # mock images (get a lot of this) and text encodings from large T5
 
 text_embeds = torch.randn(4, 256, 768).cuda()
-text_masks = torch.ones(4, 256).bool().cuda()
 images = torch.randn(4, 3, 256, 256).cuda()
 
 # feed images into imagen, training each unet in the cascade
 
 for i in (1, 2):
-    loss = imagen(images, text_embeds = text_embeds, text_masks = text_masks, unet_number = i)
+    loss = imagen(images, text_embeds = text_embeds, unet_number = i)
     loss.backward()
 
 # do the above for many many many many steps
@@ -166,21 +167,18 @@ trainer = ImagenTrainer(imagen)
 # mock images (get a lot of this) and text encodings from large T5
 
 text_embeds = torch.randn(64, 256, 1024).cuda()
-text_masks = torch.ones(64, 256).bool().cuda()
 images = torch.randn(64, 3, 256, 256).cuda()
 
 # feed images into imagen, training each unet in the cascade
 
-for i in (1, 2):
-    loss = trainer(
-        images,
-        text_embeds = text_embeds,
-        text_masks = text_masks,
-        unet_number = i,
-        max_batch_size = 4        # auto divide the batch of 64 up into batch size of 4 and accumulate gradients, so it all fits in memory
-    )
+loss = trainer(
+    images,
+    text_embeds = text_embeds,
+    unet_number = 1,            # training on unet number 1 in this example, but you will have to also save checkpoints and then reload and continue training on unet number 2
+    max_batch_size = 4          # auto divide the batch of 64 up into batch size of 4 and accumulate gradients, so it all fits in memory
+)
 
-    trainer.update(unet_number = i)
+trainer.update(unet_number = 1)
 
 # do the above for many many many many steps
 # now you can sample an image based on the text embeddings from the cascading ddpm
@@ -233,11 +231,11 @@ trainer = ImagenTrainer(imagen).cuda()
 
 training_images = torch.randn(4, 3, 256, 256).cuda()
 
-# train each unet in concert, or separately (recommended) to completion
+# train each unet separately
+# in this example, only training on unet number 1
 
-for u in (1, 2):
-    loss = trainer(training_images, unet_number = u)
-    trainer.update(unet_number = u)
+loss = trainer(training_images, unet_number = 1)
+trainer.update(unet_number = 1)
 
 # do the above for many many many many steps
 # now you can sample images unconditionally from the cascading unet(s)
@@ -259,12 +257,11 @@ trainer.steps # (2,) step number for each of the unets, in this case 2
 
 ## Dataloader
 
-You can also rely on the `ImagenTrainer` to automatically train off `DataLoader` instances. You simply have to craft your `DataLoader` to return either `images` (for unconditional case), or of `('images', 'text_embeds', 'text_masks')` for text-guided generation.
+You can also rely on the `ImagenTrainer` to automatically train off `DataLoader` instances. You simply have to craft your `DataLoader` to return either `images` (for unconditional case), or of `('images', 'text_embeds')` for text-guided generation.
 
 ex. unconditional training
 
 ```python
-import torch
 from imagen_pytorch import Unet, Imagen, ImagenTrainer
 from imagen_pytorch.data import get_images_dataloader
 
@@ -272,19 +269,18 @@ from imagen_pytorch.data import get_images_dataloader
 
 unet = Unet(
     dim = 32,
-    dim_mults = (1, 2, 4),
-    num_resnet_blocks = 3,
-    layer_attns = (False, True, True),
-    layer_cross_attns = False,
-    use_linear_attn = True
+    dim_mults = (1, 2, 4, 8),
+    num_resnet_blocks = 1,
+    layer_attns = (False, False, False, True),
+    layer_cross_attns = False
 )
 
-# imagen, which contains the unets above (base unet and super resoluting ones)
+# imagen, which contains the unet above
 
 imagen = Imagen(
-    condition_on_text = False,   # this must be set to False for unconditional Imagen
-    unets = (unet,),
-    image_sizes = (128,),
+    condition_on_text = False,  # this must be set to False for unconditional Imagen
+    unets = unet,
+    image_sizes = 128,
     timesteps = 1000
 )
 
@@ -292,21 +288,39 @@ trainer = ImagenTrainer(imagen).cuda()
 
 # instantiate your dataloader, which returns the necessary inputs to the DDPM as tuple in the order of images, text embeddings, then text masks. in this case, only images is returned as it is unconditional training
 
-train_dl = get_images_dataloader('/path/to/train/images', batch_size = 4, image_size = 128)
+train_dl = get_images_dataloader('/path/to/training/images', batch_size = 16, image_size = 128)
 
 trainer.add_train_dataloader(train_dl)
 
-# train each unet in concert, or separately (recommended) to completion
+# working training loop
 
 for i in range(200000):
-    loss = trainer.train_step(unet_number = 1)
+    loss = trainer.train_step(unet_number = 1, max_batch_size = 4)
     print(f'loss: {loss}')
 
-# do the above for many many many many steps
-# now you can sample images unconditionally from the cascading unet(s)
+    if not (i % 100) and trainer.is_main: # is_main makes sure this can run in distributed
+        images = trainer.sample(batch_size = 1, return_pil_images = True) # returns List[Image]
+        images[0].save(f'./sample-{i // 100}.png')
 
-images = trainer.sample(batch_size = 4, max_batch_size = 1) # (4, 3, 128, 128)
 ```
+
+## Multi GPU
+
+Thanks to <a href="https://huggingface.co/docs/accelerate/index">🤗 Accelerate</a>, you can do multi GPU training easily with two steps.
+
+First you need to invoke `accelerate config` in the same directory as your training script (say it is named `train.py`)
+
+```bash
+$ accelerate config
+```
+
+Next, instead of calling `python train.py` as you would for single GPU, you would use the accelerate CLI as so
+
+```bash
+$ accelerate launch train.py
+```
+
+That's it!
 
 ## Experimental
 
@@ -385,7 +399,8 @@ Not at the moment but one will likely be trained and open sourced within the yea
 - [x] make sure cascading ddpm can be trained without text condition, and make sure both continuous and discrete time gaussian diffusion works
 - [x] use primer's depthwise convs on the qkv projections in linear attention (or use token shifting before projections) - also use new dropout proposed by bayesformer, as it seems to work well with linear attention
 - [x] explore skip layer excitation in unet decoder
-- [ ] accelerate integration
+- [x] accelerate integration
+- [ ] knock out any issues that arised from accelerate
 - [ ] preencoding of text to memmapped embeddings
 - [ ] build out CLI tool for training, resuming training, and one-line generation of image
 - [ ] extend to video generation, using axial time attention as in Ho's video ddpm paper + https://github.com/lucidrains/flexible-diffusion-modeling-videos-pytorch for up to 25 minute video
