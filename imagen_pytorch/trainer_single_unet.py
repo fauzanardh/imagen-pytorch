@@ -1107,7 +1107,7 @@ class SingleUnetTrainer(nn.Module):
         self.single_unet = single_unet
         self.t5_encoder_name = t5_encoder_name
         self.verbose = verbose
-        self.use_ema = use_ema
+        self.use_ema = use_ema and self.accelerator.is_main_process
         self.ema_unet = None
 
         self.train_dl_iter = None
@@ -1239,6 +1239,11 @@ class SingleUnetTrainer(nn.Module):
         return loss
 
     def save(self, path, overwrite=True, **kwargs):
+        self.accelerator.wait_for_everyone()
+
+        if not self.accelerator.is_local_main_process:
+            return
+
         path = Path(path)
         assert not (path.exists() and not overwrite)
         path.parent.mkdir(parents=True, exist_ok=True)
