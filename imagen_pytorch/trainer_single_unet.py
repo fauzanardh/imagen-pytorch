@@ -1,6 +1,7 @@
 from math import sqrt
 from pathlib import Path
 from tqdm.auto import tqdm
+from contextlib import contextmanager
 from einops import rearrange, reduce, repeat
 from einops_exts import check_shape
 from ema_pytorch import EMA
@@ -13,14 +14,16 @@ import torch
 from torch import nn
 from torch.optim import Adam, AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.cuda.amp import autocast, GradScaler
+from torch.cuda.amp import GradScaler
 import torch.nn.functional as F
 import torchvision.transforms as T
+from accelerate import Accelerator, DistributedType, DistributedDataParallelKwargs
 
 from imagen_pytorch.imagen_pytorch import (
     GaussianDiffusion,
     GaussianDiffusionContinuousTimes,
     Unet,
+    cast_tuple,
     eval_decorator,
     identity,
     maybe,
@@ -44,6 +47,7 @@ from imagen_pytorch.trainer import (
     imagen_sample_in_chunks,
 )
 from imagen_pytorch.version import __version__
+from imagen_pytorch.data import cycle
 
 
 class SingleUnet(nn.Module):
@@ -1060,6 +1064,8 @@ class ElucidatedSingleUnet(nn.Module):
 
 
 class SingleUnetTrainer(nn.Module):
+    locked = False
+
     def __init__(
         self,
         single_unet,
@@ -1069,23 +1075,59 @@ class SingleUnetTrainer(nn.Module):
         beta1=0.9,
         beta2=0.99,
         max_grad_norm=None,
-        amp=False,
-        group_wd_params=True,
+        # group_wd_params=True,
         warmup_steps=None,
         cosine_decay_max_steps=None,
+        train_dl=None,
+        valid_dl=None,
+        fp16=False,
+        split_batches=True,
+        dl_tuple_output_keywords_names=(
+            "images",
+            "text_embeds",
+            "text_masks",
+            "cond_images",
+        ),
         optimizer="adam",
+        t5_encoder_name=None,
+        verbose=True,
         **kwargs,
     ):
         super().__init__()
 
         assert isinstance(single_unet, (ElucidatedSingleUnet, SingleUnet))
         ema_kwargs, kwargs = groupby_prefix_and_trim("ema_", kwargs)
+        accelerate_kwargs, kwargs = groupby_prefix_and_trim("accelerate_", kwargs)
 
+        self.accelerator = Accelerator(
+            **{
+                "split_batches": split_batches,
+                "mixed_precision": "fp16" if fp16 else "no",
+                "kwargs_handlers": [
+                    DistributedDataParallelKwargs(find_unused_parameters=True)
+                ],
+                **accelerate_kwargs,
+            }
+        )
+        SingleUnetTrainer.locked = self.is_distributed
+
+        grad_scaler_enabled = fp16
         self.single_unet = single_unet
+        self.t5_encoder_name = t5_encoder_name
+        self.verbose = verbose
         self.use_ema = use_ema
         self.ema_unet = None
 
-        self.amp = amp
+        self.train_dl_iter = None
+        self.train_dl = None
+
+        self.valid_dl_iter = None
+        self.valid_dl = None
+
+        self.dl_tuple_output_keywords_names = dl_tuple_output_keywords_names
+
+        self.add_train_dataloader(train_dl)
+        self.add_valid_dataloader(valid_dl)
 
         if optimizer == "adam":
             optim = Adam(
@@ -1145,7 +1187,7 @@ class SingleUnetTrainer(nn.Module):
         if self.use_ema:
             self.ema_unet = EMA(single_unet.unet, **ema_kwargs)
 
-        scaler = GradScaler(enabled=amp)
+        scaler = GradScaler(enabled=grad_scaler_enabled)
         self.scaler = scaler
 
         scheduler = warmup_scheduler = None
@@ -1159,14 +1201,50 @@ class SingleUnetTrainer(nn.Module):
 
         self.max_grad_norm = max_grad_norm
         self.register_buffer("steps", torch.Tensor([0]))
+        self.register_buffer("_temp", torch.tensor([0.0]), persistent=False)
 
         self.to(next(single_unet.parameters()).device)
-
-        self.register_buffer("_temp", torch.tensor([0.0]), persistent=False)
 
     @property
     def device(self):
         return self._temp.device
+
+    @property
+    def is_distributed(self):
+        return not (
+            self.accelerator.distributed_type == DistributedType.NO
+            and self.accelerator.num_processes == 1
+        )
+
+    def add_train_dataloader(self, dl=None):
+        if not exists(dl):
+            return
+        assert not exists(self.train_dl), "train dl already exists"
+        self.train_dl = self.accelerator.prepare(dl)
+
+    def add_valid_dataloader(self, dl=None):
+        if not exists(dl):
+            return
+        assert not exists(self.valid_dl), "valid dl already exists"
+        self.valid_dl = self.accelerator.prepare(dl)
+
+    def create_train_iter(self):
+        assert exists(self.train_dl), "train dl does not exist"
+        if exists(self.train_dl_iter):
+            return
+        self.train_dl_iter = cycle(self.train_dl)
+
+    def create_valid_iter(self):
+        assert exists(self.valid_dl), "valid dl does not exist"
+        if exists(self.valid_dl_iter):
+            return
+        self.valid_dl_iter = cycle(self.valid_dl)
+
+    def train_step(self, **kwargs):
+        self.create_train_iter()
+        loss = self.step_with_dl_iter(self.train_dl_iter, **kwargs)
+        self.update()
+        return loss
 
     def save(self, path, overwrite=True, **kwargs):
         path = Path(path)
@@ -1218,18 +1296,57 @@ class SingleUnetTrainer(nn.Module):
 
         return loaded_obj
 
-    def scale(self, loss):
-        return self.scaler.scale(loss)
+    @torch.no_grad()
+    @eval_decorator
+    def valid_step(self, **kwargs):
+        self.create_valid_iter()
+        context = self.use_ema_unet if self.use_ema else nullcontext
+
+        with context():
+            loss = self.step_with_dl_iter(self.valid_dl_iter, **kwargs)
+        return loss
+
+    def step_with_dl_iter(self, dl_iter, **kwargs):
+        dl_tuple_output = cast_tuple(next(dl_iter))
+        model_input = dict(
+            list(zip(self.dl_tuple_output_keywords_names, dl_tuple_output))
+        )
+        loss = self.forward(**{**kwargs, **model_input})
+        return loss
+
+    @torch.no_grad()
+    @contextmanager
+    def use_ema_unet(self):
+        if not self.use_ema:
+            output = yield
+            return output
+
+        self.single_unet.eval()
+        trainable_unet = self.single_unet.unet
+        self.single_unet.unet = self.ema_unet.ema_model
+
+        output = yield
+
+        self.single_unet.unet = trainable_unet
+        self.ema_unet.restore_ema_model_device()
+        return output
+
+    def state_dict(self, *args, **kwargs):
+        return super().state_dict(*args, **kwargs)
+
+    def load_state_dict(self, *args, **kwargs):
+        return super().load_state_dict(*args, **kwargs)
+
+    def encode_text(self, text, **kwargs):
+        return t5_encode_text(text, name=self.t5_encoder_name, **kwargs)
 
     def update(self):
         if exists(self.max_grad_norm):
-            self.scaler.unscale_(self.optim)
-            nn.utils.clip_grad_norm_(
+            self.accelerator.clip_grad_norm_(
                 self.single_unet.unet.parameters(), self.max_grad_norm
             )
 
-        self.scaler.step(self.optim)
-        self.scaler.update()
+        self.optim.step()
         self.optim.zero_grad()
 
         if self.use_ema:
@@ -1241,7 +1358,10 @@ class SingleUnetTrainer(nn.Module):
             else self.warmup_scheduler.dampening()
         )
         with maybe_warmup_context:
-            if exists(self.scheduler):
+            if (
+                exists(self.scheduler)
+                and not self.accelerator.optimizer_step_was_skipped
+            ):
                 self.scheduler.step()
 
         self.steps += 1
@@ -1250,37 +1370,35 @@ class SingleUnetTrainer(nn.Module):
     @cast_torch_tensor
     @imagen_sample_in_chunks
     def sample(self, *args, **kwargs):
-        if kwargs.pop("use_non_ema", False) or not self.use_ema:
-            return self.single_unet.sample(*args, **kwargs)
+        context = self.use_ema_unet if self.use_ema else nullcontext
 
-        device = self.steps.device
-        trainable_unets = self.single_unet.unet
-        self.single_unet.unet = self.ema_unet.ema_model
-        output = self.single_unet.sample(*args, device=device, **kwargs)
-        self.single_unet.unet = trainable_unets
-        self.ema_unet.restore_ema_model_device()
+        with context():
+            output = self.single_unet.sample(*args, **kwargs)
 
         return output
 
     @cast_torch_tensor
-    def forward(self, *args, max_batch_size=None, **kwargs):
+    def forward(
+        self,
+        *args,
+        max_batch_size=None,
+        **kwargs,
+    ):
         total_loss = 0.0
-
         for chunk_size_frac, (chunked_args, chunked_kwargs) in split_args_and_kwargs(
             *args,
             split_size=max_batch_size,
             **kwargs,
         ):
-            with autocast(enabled=self.amp):
+            with self.accelerator.autocast():
                 loss = self.single_unet(
                     *chunked_args,
                     **chunked_kwargs,
                 )
                 loss = loss * chunk_size_frac
-
             total_loss += loss.item()
 
             if self.training:
-                self.scale(loss).backward()
+                self.accelerator.backward(loss)
 
         return total_loss
