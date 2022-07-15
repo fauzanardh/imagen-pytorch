@@ -10,12 +10,15 @@ import torch.nn.functional as F
 from torch import nn, einsum
 import torchvision.transforms as T
 
+import kornia.augmentation as K
+
 from einops import rearrange, repeat, reduce
 
 from imagen_pytorch.imagen_pytorch import (
     GaussianDiffusion,
     GaussianDiffusionContinuousTimes,
     Unet,
+    first,
     exists,
     identity,
     maybe,
@@ -68,6 +71,7 @@ class ElucidatedImagen(nn.Module):
         text_embed_dim = None,
         channels = 3,
         cond_drop_prob = 0.1,
+        random_crop_sizes = None,
         lowres_sample_noise_level = 0.2,            # in the paper, they present a new trick where they noise the lowres conditioning image, and at sample time, fix it to a certain level (0.1 or 0.3) - the unets are also made to be conditioned on this noise level
         per_sample_random_aug_noise_level = False,  # unclear when conditioning on augmentation noise level, whether each batch element receives a random aug noise value - turning off due to @marunine's find
         condition_on_text = True,
@@ -104,6 +108,11 @@ class ElucidatedImagen(nn.Module):
 
         unets = cast_tuple(unets)
         num_unets = len(unets)
+
+        # randomly cropping for upsampler training
+
+        self.random_crop_sizes = cast_tuple(random_crop_sizes, num_unets)
+        assert not exists(first(self.random_crop_sizes)), 'you should not need to randomly crop image during training for base unet, only for upsamplers - so pass in `random_crop_sizes = (None, 128, 256)` as example'
 
         # lowres augmentation noise schedule
 
@@ -457,7 +466,10 @@ class ElucidatedImagen(nn.Module):
 
         lowres_sample_noise_level = default(lowres_sample_noise_level, self.lowres_sample_noise_level)
 
-        for unet_number, unet, channel, image_size, unet_hparam, dynamic_threshold in tqdm(zip(range(1, len(self.unets) + 1), self.unets, self.sample_channels, self.image_sizes, self.hparams, self.dynamic_thresholding), disable = not use_tqdm):
+        num_unets = len(self.unets)
+        cond_scale = cast_tuple(cond_scale, num_unets)
+
+        for unet_number, unet, channel, image_size, unet_hparam, dynamic_threshold, unet_cond_scale in tqdm(zip(range(1, num_unets + 1), self.unets, self.sample_channels, self.image_sizes, self.hparams, self.dynamic_thresholding, cond_scale), disable = not use_tqdm):
 
             context = self.one_unet_in_gpu(unet = unet) if is_cuda else nullcontext()
 
@@ -468,7 +480,7 @@ class ElucidatedImagen(nn.Module):
                 if unet.lowres_cond:
                     lowres_noise_times = self.lowres_noise_schedule.get_times(batch_size, lowres_sample_noise_level, device = device)
 
-                    lowres_cond_img = resize_image_to(img, image_size, pad_mode = 'reflect')
+                    lowres_cond_img = resize_image_to(img, image_size)
                     lowres_cond_img, _ = self.lowres_noise_schedule.q_sample(x_start = lowres_cond_img, t = lowres_noise_times, noise = torch.randn_like(lowres_cond_img))
 
                 shape = (batch_size, self.channels, image_size, image_size)
@@ -480,7 +492,7 @@ class ElucidatedImagen(nn.Module):
                     text_embeds = text_embeds,
                     text_mask = text_masks,
                     cond_images = cond_images,
-                    cond_scale = cond_scale,
+                    cond_scale = unet_cond_scale,
                     lowres_cond_img = lowres_cond_img,
                     lowres_noise_times = lowres_noise_times,
                     dynamic_threshold = dynamic_threshold,
@@ -532,6 +544,7 @@ class ElucidatedImagen(nn.Module):
         unet = default(unet, lambda: self.get_unet(unet_number))
 
         target_image_size    = self.image_sizes[unet_index]
+        random_crop_size     = self.random_crop_sizes[unet_index]
         prev_image_size      = self.image_sizes[unet_index - 1] if unet_index > 0 else None
         hp                   = self.hparams[unet_index]
 
@@ -556,8 +569,8 @@ class ElucidatedImagen(nn.Module):
 
         lowres_cond_img = lowres_aug_times = None
         if exists(prev_image_size):
-            lowres_cond_img = resize_image_to(images, prev_image_size, clamp_range = self.input_image_range, pad_mode = 'reflect')
-            lowres_cond_img = resize_image_to(lowres_cond_img, target_image_size, clamp_range = self.input_image_range, pad_mode = 'reflect')
+            lowres_cond_img = resize_image_to(images, prev_image_size, clamp_range = self.input_image_range)
+            lowres_cond_img = resize_image_to(lowres_cond_img, target_image_size, clamp_range = self.input_image_range)
 
             if self.per_sample_random_aug_noise_level:
                 lowres_aug_times = self.lowres_noise_schedule.sample_random_times(batch_size, device = device)
@@ -571,6 +584,17 @@ class ElucidatedImagen(nn.Module):
 
         images = self.normalize_img(images)
         lowres_cond_img = maybe(self.normalize_img)(lowres_cond_img)
+
+        # random cropping during training
+        # for upsamplers
+
+        if exists(random_crop_size):
+            aug = K.RandomCrop((random_crop_size, random_crop_size), p = 1.)
+
+            # make sure low res conditioner and image both get augmented the same way
+            # detailed https://kornia.readthedocs.io/en/latest/augmentation.module.html?highlight=randomcrop#kornia.augmentation.RandomCrop
+            images = aug(images)
+            lowres_cond_img = aug(lowres_cond_img, params = aug._params)
 
         # noise the lowres conditioning image
         # at sample time, they then fix the noise level of 0.1 - 0.3

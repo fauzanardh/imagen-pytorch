@@ -13,12 +13,12 @@ from torch import nn, einsum
 from torch.special import expm1
 import torchvision.transforms as T
 
+import kornia.augmentation as K
+
 from einops import rearrange, repeat, reduce
 from einops.layers.torch import Rearrange, Reduce
 from einops_exts import rearrange_many, repeat_many, check_shape
 from einops_exts.torch import EinopsToAndFrom
-
-from resize_right import resize
 
 from imagen_pytorch.t5 import t5_encode_text, get_encoded_dim, DEFAULT_T5_NAME
 
@@ -29,6 +29,11 @@ def exists(val):
 
 def identity(t, *args, **kwargs):
     return t
+
+def first(arr, d = None):
+    if len(arr) == 0:
+        return d
+    return arr[0]
 
 def maybe(fn):
     @wraps(fn)
@@ -110,14 +115,17 @@ def masked_mean(t, *, dim, mask = None):
 
     return masked_t.sum(dim = dim) / denom.clamp(min = 1e-5)
 
-def resize_image_to(image, target_image_size, clamp_range = None, pad_mode = 'constant'):
+def resize_image_to(
+    image,
+    target_image_size,
+    clamp_range = None
+):
     orig_image_size = image.shape[-1]
 
     if orig_image_size == target_image_size:
         return image
 
-    scale_factors = target_image_size / orig_image_size
-    out = resize(image, scale_factors = scale_factors, pad_mode = pad_mode)
+    out = F.interpolate(image, target_image_size, mode = 'nearest')
 
     if exists(clamp_range):
         out = out.clamp(*clamp_range)
@@ -963,18 +971,25 @@ class TransformerBlock(nn.Module):
         self,
         dim,
         *,
+        depth = 1,
         heads = 8,
         dim_head = 32,
         ff_mult = 2,
         context_dim = None
     ):
         super().__init__()
-        self.attn = EinopsToAndFrom('b c h w', 'b (h w) c', Attention(dim = dim, heads = heads, dim_head = dim_head, context_dim = context_dim))
-        self.ff = ChanFeedForward(dim = dim, mult = ff_mult)
+        self.layers = nn.ModuleList([])
+
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                EinopsToAndFrom('b c h w', 'b (h w) c', Attention(dim = dim, heads = heads, dim_head = dim_head, context_dim = context_dim)),
+                ChanFeedForward(dim = dim, mult = ff_mult)
+            ]))
 
     def forward(self, x, context = None):
-        x = self.attn(x, context = context) + x
-        x = self.ff(x) + x
+        for attn, ff in self.layers:
+            x = attn(x, context = context) + x
+            x = ff(x) + x
         return x
 
 class LinearAttentionTransformerBlock(nn.Module):
@@ -982,18 +997,25 @@ class LinearAttentionTransformerBlock(nn.Module):
         self,
         dim,
         *,
+        depth = 1,
         heads = 8,
         dim_head = 32,
         ff_mult = 2,
         context_dim = None
     ):
         super().__init__()
-        self.attn = LinearAttention(dim = dim, heads = heads, dim_head = dim_head, context_dim = context_dim)
-        self.ff = ChanFeedForward(dim = dim, mult = ff_mult)
+        self.layers = nn.ModuleList([])
+
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                LinearAttention(dim = dim, heads = heads, dim_head = dim_head, context_dim = context_dim),
+                ChanFeedForward(dim = dim, mult = ff_mult)
+            ]))
 
     def forward(self, x, context = None):
-        x = self.attn(x, context = context) + x
-        x = self.ff(x) + x
+        for attn, ff in self.layers:
+            x = attn(x, context = context) + x
+            x = ff(x) + x
         return x
 
 class CrossEmbedLayer(nn.Module):
@@ -1046,6 +1068,7 @@ class Unet(nn.Module):
         ff_mult = 2.,
         lowres_cond = False,                # for cascading diffusion - https://cascaded-diffusion.github.io/
         layer_attns = True,
+        layer_attns_depth = 1,
         layer_attns_add_text_cond = True,   # whether to condition the self-attention blocks with the text embeddings, as described in Appendix D.3.1
         attend_at_middle = True,            # whether to have a layer of attention at the bottleneck (can turn off for higher resolution in cascading DDPM, before bringing in efficient attention)
         layer_cross_attns = True,
@@ -1084,11 +1107,6 @@ class Unet(nn.Module):
         self._locals = locals()
         self._locals.pop('self', None)
         self._locals.pop('__class__', None)
-
-        # for eventual cascading diffusion
-
-        self.lowres_cond = lowres_cond
-
 
         # determine dimensions
 
@@ -1216,6 +1234,7 @@ class Unet(nn.Module):
         resnet_groups = cast_tuple(resnet_groups, num_layers)
 
         layer_attns = cast_tuple(layer_attns, num_layers)
+        layer_attns_depth = cast_tuple(layer_attns_depth, num_layers)
         layer_cross_attns = cast_tuple(layer_cross_attns, num_layers)
 
         assert all([layers == num_layers for layers in list(map(len, (resnet_groups, layer_attns, layer_cross_attns)))])
@@ -1241,14 +1260,14 @@ class Unet(nn.Module):
         self.ups = nn.ModuleList([])
         num_resolutions = len(in_out)
 
-        layer_params = [num_resnet_blocks, resnet_groups, layer_attns, layer_cross_attns]
+        layer_params = [num_resnet_blocks, resnet_groups, layer_attns, layer_attns_depth, layer_cross_attns]
         reversed_layer_params = list(map(reversed, layer_params))
 
         # downsampling layers
 
         skip_connect_dims = [] # keep track of skip connection dimensions
 
-        for ind, ((dim_in, dim_out), layer_num_resnet_blocks, groups, layer_attn, layer_cross_attn) in enumerate(zip(in_out, *layer_params)):
+        for ind, ((dim_in, dim_out), layer_num_resnet_blocks, groups, layer_attn, layer_attn_depth, layer_cross_attn) in enumerate(zip(in_out, *layer_params)):
             is_last = ind >= (num_resolutions - 1)
 
             layer_use_linear_cross_attn = not layer_cross_attn and use_linear_cross_attn
@@ -1278,7 +1297,7 @@ class Unet(nn.Module):
                 pre_downsample,
                 ResnetBlock(current_dim, current_dim, cond_dim = layer_cond_dim, linear_attn = layer_use_linear_cross_attn, time_cond_dim = time_cond_dim, groups = groups),
                 nn.ModuleList([ResnetBlock(current_dim, current_dim, time_cond_dim = time_cond_dim, groups = groups, use_gca = use_global_context_attn) for _ in range(layer_num_resnet_blocks)]),
-                transformer_block_klass(dim = current_dim, heads = attn_heads, dim_head = attn_dim_head, ff_mult = ff_mult, context_dim = cond_dim),
+                transformer_block_klass(dim = current_dim, depth = layer_attn_depth, heads = attn_heads, dim_head = attn_dim_head, ff_mult = ff_mult, context_dim = cond_dim),
                 post_downsample
             ]))
 
@@ -1296,7 +1315,7 @@ class Unet(nn.Module):
 
         # upsampling layers
 
-        for ind, ((dim_in, dim_out), layer_num_resnet_blocks, groups, layer_attn, layer_cross_attn) in enumerate(zip(reversed(in_out), *reversed_layer_params)):
+        for ind, ((dim_in, dim_out), layer_num_resnet_blocks, groups, layer_attn, layer_attn_depth, layer_cross_attn) in enumerate(zip(reversed(in_out), *reversed_layer_params)):
             is_last = ind == (len(in_out) - 1)
             layer_use_linear_cross_attn = not layer_cross_attn and use_linear_cross_attn
             layer_cond_dim = cond_dim if layer_cross_attn or layer_use_linear_cross_attn else None
@@ -1307,7 +1326,7 @@ class Unet(nn.Module):
             self.ups.append(nn.ModuleList([
                 ResnetBlock(dim_out + skip_connect_dim, dim_out, cond_dim = layer_cond_dim, linear_attn = layer_use_linear_cross_attn, time_cond_dim = time_cond_dim, groups = groups),
                 nn.ModuleList([ResnetBlock(dim_out + skip_connect_dim, dim_out, time_cond_dim = time_cond_dim, groups = groups, use_gca = use_global_context_attn) for _ in range(layer_num_resnet_blocks)]),
-                transformer_block_klass(dim = dim_out, heads = attn_heads, dim_head = attn_dim_head, ff_mult = ff_mult, context_dim = cond_dim),
+                transformer_block_klass(dim = dim_out, depth = layer_attn_depth, heads = attn_heads, dim_head = attn_dim_head, ff_mult = ff_mult, context_dim = cond_dim),
                 upsample_klass(dim_out, dim_in) if not is_last or memory_efficient else Identity()
             ]))
 
@@ -1321,6 +1340,8 @@ class Unet(nn.Module):
         self.final_res_block = ResnetBlock(final_conv_dim, dim, time_cond_dim = time_cond_dim, groups = resnet_groups[0], use_gca = True) if final_resnet_block else None
 
         final_conv_dim_in = dim if final_resnet_block else final_conv_dim
+        final_conv_dim_in += (channels if lowres_cond else 0)
+
         self.final_conv = nn.Conv2d(final_conv_dim_in, self.channels_out, final_conv_kernel_size, padding = final_conv_kernel_size // 2)
 
         zero_init_(self.final_conv)
@@ -1592,6 +1613,9 @@ class Unet(nn.Module):
         if exists(self.final_res_block):
             x = self.final_res_block(x, t)
 
+        if exists(lowres_cond_img):
+            x = torch.cat((x, lowres_cond_img), dim = 1)
+
         return self.final_conv(x)
 
 # predefined unets, with configs lining up with hyperparameters in appendix of paper
@@ -1654,6 +1678,7 @@ class Imagen(nn.Module):
         loss_type = 'l2',
         noise_schedules = 'cosine',
         pred_objectives = 'noise',
+        random_crop_sizes = None,
         lowres_noise_schedule = 'linear',
         lowres_sample_noise_level = 0.2,            # in the paper, they present a new trick where they noise the lowres conditioning image, and at sample time, fix it to a certain level (0.1 or 0.3) - the unets are also made to be conditioned on this noise level
         per_sample_random_aug_noise_level = False,  # unclear when conditioning on augmentation noise level, whether each batch element receives a random aug noise value - turning off due to @marunine's find
@@ -1715,6 +1740,11 @@ class Imagen(nn.Module):
         for timestep, noise_schedule in zip(timesteps, noise_schedules):
             noise_scheduler = noise_scheduler_klass(noise_schedule = noise_schedule, timesteps = timestep)
             self.noise_schedulers.append(noise_scheduler)
+
+        # randomly cropping for upsampler training
+
+        self.random_crop_sizes = cast_tuple(random_crop_sizes, num_unets)
+        assert not exists(first(self.random_crop_sizes)), 'you should not need to randomly crop image during training for base unet, only for upsamplers - so pass in `random_crop_sizes = (None, 128, 256)` as example'
 
         # lowres augmentation noise schedule
 
@@ -1967,7 +1997,10 @@ class Imagen(nn.Module):
 
         lowres_sample_noise_level = default(lowres_sample_noise_level, self.lowres_sample_noise_level)
 
-        for unet_number, unet, channel, image_size, noise_scheduler, pred_objective, dynamic_threshold in tqdm(zip(range(1, len(self.unets) + 1), self.unets, self.sample_channels, self.image_sizes, self.noise_schedulers, self.pred_objectives, self.dynamic_thresholding), disable = not use_tqdm):
+        num_unets = len(self.unets)
+        cond_scale = cast_tuple(cond_scale, num_unets)
+
+        for unet_number, unet, channel, image_size, noise_scheduler, pred_objective, dynamic_threshold, unet_cond_scale in tqdm(zip(range(1, num_unets + 1), self.unets, self.sample_channels, self.image_sizes, self.noise_schedulers, self.pred_objectives, self.dynamic_thresholding, cond_scale), disable = not use_tqdm):
 
             context = self.one_unet_in_gpu(unet = unet) if is_cuda else nullcontext()
 
@@ -1978,7 +2011,7 @@ class Imagen(nn.Module):
                 if unet.lowres_cond:
                     lowres_noise_times = self.lowres_noise_schedule.get_times(batch_size, lowres_sample_noise_level, device = device)
 
-                    lowres_cond_img = resize_image_to(img, image_size, pad_mode = 'reflect')
+                    lowres_cond_img = resize_image_to(img, image_size)
                     lowres_cond_img, _ = self.lowres_noise_schedule.q_sample(x_start = lowres_cond_img, t = lowres_noise_times, noise = torch.randn_like(lowres_cond_img))
 
                 shape = (batch_size, self.channels, image_size, image_size)
@@ -1989,7 +2022,7 @@ class Imagen(nn.Module):
                     text_embeds = text_embeds,
                     text_mask = text_masks,
                     cond_images = cond_images,
-                    cond_scale = cond_scale,
+                    cond_scale = unet_cond_scale,
                     lowres_cond_img = lowres_cond_img,
                     lowres_noise_times = lowres_noise_times,
                     noise_scheduler = noise_scheduler,
@@ -2015,13 +2048,25 @@ class Imagen(nn.Module):
 
         return pil_images[output_index] # now you have a bunch of pillow images you can just .save(/where/ever/you/want.png)
 
-    def p_losses(self, unet, x_start, times, *, noise_scheduler, lowres_cond_img = None, lowres_aug_times = None, text_embeds = None, text_mask = None, cond_images = None, noise = None, times_next = None, pred_objective = 'noise', p2_loss_weight_gamma = 0.):
+    def p_losses(self, unet, x_start, times, *, noise_scheduler, lowres_cond_img = None, lowres_aug_times = None, text_embeds = None, text_mask = None, cond_images = None, noise = None, times_next = None, pred_objective = 'noise', p2_loss_weight_gamma = 0., random_crop_size = None):
         noise = default(noise, lambda: torch.randn_like(x_start))
 
         # normalize to [-1, 1]
 
         x_start = self.normalize_img(x_start)
         lowres_cond_img = maybe(self.normalize_img)(lowres_cond_img)
+
+        # random cropping during training
+        # for upsamplers
+
+        if exists(random_crop_size):
+            aug = K.RandomCrop((random_crop_size, random_crop_size), p = 1.)
+
+            # make sure low res conditioner and image both get augmented the same way
+            # detailed https://kornia.readthedocs.io/en/latest/augmentation.module.html?highlight=randomcrop#kornia.augmentation.RandomCrop
+            x_start = aug(x_start)
+            lowres_cond_img = aug(lowres_cond_img, params = aug._params)
+            noise = aug(noise, params = aug._params)
 
         # get x_t
 
@@ -2093,6 +2138,7 @@ class Imagen(nn.Module):
         p2_loss_weight_gamma = self.p2_loss_weight_gamma[unet_index]
         pred_objective       = self.pred_objectives[unet_index]
         target_image_size    = self.image_sizes[unet_index]
+        random_crop_size     = self.random_crop_sizes[unet_index]
         prev_image_size      = self.image_sizes[unet_index - 1] if unet_index > 0 else None
         b, c, h, w, device,  = *images.shape, images.device
 
@@ -2117,8 +2163,8 @@ class Imagen(nn.Module):
 
         lowres_cond_img = lowres_aug_times = None
         if exists(prev_image_size):
-            lowres_cond_img = resize_image_to(images, prev_image_size, clamp_range = self.input_image_range, pad_mode = 'reflect')
-            lowres_cond_img = resize_image_to(lowres_cond_img, target_image_size, clamp_range = self.input_image_range, pad_mode = 'reflect')
+            lowres_cond_img = resize_image_to(images, prev_image_size, clamp_range = self.input_image_range)
+            lowres_cond_img = resize_image_to(lowres_cond_img, target_image_size, clamp_range = self.input_image_range)
 
             if self.per_sample_random_aug_noise_level:
                 lowres_aug_times = self.lowres_noise_schedule.sample_random_times(b, device = device)
@@ -2128,4 +2174,4 @@ class Imagen(nn.Module):
 
         images = resize_image_to(images, target_image_size)
 
-        return self.p_losses(unet, images, times, text_embeds = text_embeds, text_mask = text_masks, cond_images = cond_images, noise_scheduler = noise_scheduler, lowres_cond_img = lowres_cond_img, lowres_aug_times = lowres_aug_times, pred_objective = pred_objective, p2_loss_weight_gamma = p2_loss_weight_gamma)
+        return self.p_losses(unet, images, times, text_embeds = text_embeds, text_mask = text_masks, cond_images = cond_images, noise_scheduler = noise_scheduler, lowres_cond_img = lowres_cond_img, lowres_aug_times = lowres_aug_times, pred_objective = pred_objective, p2_loss_weight_gamma = p2_loss_weight_gamma, random_crop_size = random_crop_size)
