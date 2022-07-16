@@ -1184,9 +1184,9 @@ class SingleUnetTrainer(nn.Module):
 
         scheduler = warmup_scheduler = None
         if exists(cosine_decay_max_steps):
-            scheduler = CosineAnnealingLR(optimizer, T_max=cosine_decay_max_steps)
+            scheduler = CosineAnnealingLR(optim, T_max=cosine_decay_max_steps)
         if exists(warmup_steps):
-            warmup_scheduler = warmup.LinearWarmup(optimizer, warmup_steps)
+            warmup_scheduler = warmup.LinearWarmup(optim, warmup_steps)
 
         self.scheduler = scheduler
         self.warmup_scheduler = warmup_scheduler
