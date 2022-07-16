@@ -1,6 +1,7 @@
 import math
 import copy
 from typing import List
+from requests import patch
 from tqdm import tqdm
 from functools import partial, wraps
 from contextlib import contextmanager, nullcontext
@@ -14,6 +15,7 @@ from torch.special import expm1
 import torchvision.transforms as T
 
 import kornia.augmentation as K
+from resize_right import resize, interp_methods
 
 from einops import rearrange, repeat, reduce
 from einops.layers.torch import Rearrange, Reduce
@@ -120,22 +122,25 @@ def masked_mean(t, *, dim, mask = None):
 
     return masked_t.sum(dim = dim) / denom.clamp(min = 1e-5)
 
-def resize_image_to(
-    image,
-    target_image_size,
-    clamp_range = None
-):
+def resize_image_to(image, target_image_size):
     orig_image_size = image.shape[-1]
 
     if orig_image_size == target_image_size:
         return image
 
-    out = F.interpolate(image, target_image_size, mode = 'nearest')
+    scale_factors = target_image_size / orig_image_size
 
-    if exists(clamp_range):
-        out = out.clamp(*clamp_range)
+    if target_image_size < orig_image_size:
+        image = resize(image, scale_factors=scale_factors, pad_mode='reflect')
+    else:
+        image = resize(
+            image,
+            scale_factors=scale_factors,
+            interp_method=interp_methods.lanczos3,
+            antialiasing=False,
+            pad_mode='reflect')
 
-    return out
+    return image.clamp(-1, 1)
 
 # image normalization functions
 # ddpms expect images to be in the range of -1 to 1
@@ -1097,6 +1102,7 @@ class Unet(nn.Module):
         scale_skip_connection = True,
         final_resnet_block = True,
         final_conv_kernel_size = 3,
+        patch_size=1,
         pixel_shuffle_upsample = True        # may address checkboard artifacts
     ):
         super().__init__()
@@ -1128,6 +1134,11 @@ class Unet(nn.Module):
         self.cond_images_channels = cond_images_channels
 
         init_channels += cond_images_channels
+
+        # patched diffusion
+        self.patch_size = patch_size
+        init_channels = init_channels * self.patch_size ** 2
+        self.channels_out = self.channels_out * self.patch_size ** 2
 
         # initial convolution
 
@@ -1466,6 +1477,10 @@ class Unet(nn.Module):
             cond_images = resize_image_to(cond_images, x.shape[-1])
             x = torch.cat((cond_images, x), dim = 1)
 
+        # patched diffusion
+        if self.patch_size > 1:
+            x = F.pixel_unshuffle(x, downscale_factor=self.patch_size)
+
         # initial convolution
 
         x = self.init_conv(x)
@@ -1622,7 +1637,12 @@ class Unet(nn.Module):
         if exists(lowres_cond_img):
             x = torch.cat((x, lowres_cond_img), dim = 1)
 
-        return self.final_conv(x)
+        x = self.final_conv(x)
+
+        if self.patch_size > 1:
+            x = F.pixel_shuffle(x, upscale_factor=self.patch_size)
+
+        return x
 
 # predefined unets, with configs lining up with hyperparameters in appendix of paper
 

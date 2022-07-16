@@ -27,6 +27,7 @@ setup(
   ],
   install_requires=[
     'accelerate',
+    'resize-right',
     'click',
     'einops>=0.4',
     'einops-exts',
