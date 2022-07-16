@@ -59,6 +59,11 @@ def cast_tuple(val, length = None):
 
     return output
 
+def cast_uint8_images_to_float(images):
+    if not images.dtype == torch.uint8:
+        return images
+    return images / 255
+
 def module_device(module):
     return next(module.parameters()).device
 
@@ -1077,8 +1082,9 @@ class Unet(nn.Module):
         cond_on_text = True,
         max_text_len = 256,
         init_dim = None,
-        init_conv_kernel_size = 7,
         resnet_groups = 8,
+        init_conv_kernel_size = 7,          # kernel size of initial conv, if not using cross embed
+        init_cross_embed = True,
         init_cross_embed_kernel_sizes = (3, 7, 15),
         cross_embed_downsample = False,
         cross_embed_downsample_kernel_sizes = (2, 4),
@@ -1125,7 +1131,7 @@ class Unet(nn.Module):
 
         # initial convolution
 
-        self.init_conv = CrossEmbedLayer(init_channels, dim_out = init_dim, kernel_sizes = init_cross_embed_kernel_sizes, stride = 1)
+        self.init_conv = CrossEmbedLayer(init_channels, dim_out = init_dim, kernel_sizes = init_cross_embed_kernel_sizes, stride = 1) if init_cross_embed else nn.Conv2d(init_channels, init_dim, init_conv_kernel_size, padding = init_conv_kernel_size // 2)
 
         dims = [init_dim, *map(lambda m: dim * m, dim_mults)]
         in_out = list(zip(dims[:-1], dims[1:]))
@@ -1976,6 +1982,8 @@ class Imagen(nn.Module):
         device = default(device, self.device)
         self.reset_unets_all_one_device(device = device)
 
+        cond_images = maybe(cast_uint8_images_to_float)(cond_images)
+
         if exists(texts) and not exists(text_embeds) and not self.unconditional:
             text_embeds, text_masks = self.encode_text(texts, return_attn_mask = True)
             text_embeds, text_masks = map(lambda t: t.to(device), (text_embeds, text_masks))
@@ -2129,6 +2137,9 @@ class Imagen(nn.Module):
         assert not (len(self.unets) > 1 and not exists(unet_number)), f'you must specify which unet you want trained, from a range of 1 to {len(self.unets)}, if you are training cascading DDPM (multiple unets)'
         unet_number = default(unet_number, 1)
         assert not exists(self.only_train_unet_number) or self.only_train_unet_number == unet_number, 'you can only train on unet #{self.only_train_unet_number}'
+
+        images = cast_uint8_images_to_float(images)
+        cond_images = maybe(cast_uint8_images_to_float)(cond_images)
 
         unet_index = unet_number - 1
         

@@ -89,9 +89,9 @@ def t5_encode_tokenized_text(
     name = DEFAULT_T5_NAME
 ):
     assert exists(attn_mask) or exists(pad_id)
-    t5, tokenizer = get_model_and_tokenizer(name)
+    t5, _ = get_model_and_tokenizer(name)
 
-    mask = default(attn_mask, lambda: (token_ids != pad_id).long())
+    attn_mask = default(attn_mask, lambda: (token_ids != pad_id).long())
 
     t5.eval()
 
@@ -110,7 +110,7 @@ def t5_encode_text(
     return_attn_mask = False
 ):
     token_ids, attn_mask = t5_tokenize(texts, name = name)
-    encoded_text = t5_encode_tokenized_text(token_ids, attn_mask = attn_mask)
+    encoded_text = t5_encode_tokenized_text(token_ids, attn_mask = attn_mask, name = name)
 
     if return_attn_mask:
         attn_mask = attn_mask.bool()
