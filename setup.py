@@ -32,6 +32,7 @@ setup(
     'einops-exts',
     'ema-pytorch>=0.0.3',
     'kornia',
+    'resize-right',
     'numpy',
     'packaging',
     'pillow',
