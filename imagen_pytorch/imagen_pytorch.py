@@ -14,6 +14,7 @@ from torch.special import expm1
 import torchvision.transforms as T
 
 import kornia.augmentation as K
+from resize_right import resize, interp_methods
 
 from einops import rearrange, repeat, reduce
 from einops.layers.torch import Rearrange, Reduce
@@ -120,22 +121,25 @@ def masked_mean(t, *, dim, mask = None):
 
     return masked_t.sum(dim = dim) / denom.clamp(min = 1e-5)
 
-def resize_image_to(
-    image,
-    target_image_size,
-    clamp_range = None
-):
+def resize_image_to(image, target_image_size, clamp_range=(-1, 1)):
     orig_image_size = image.shape[-1]
 
     if orig_image_size == target_image_size:
         return image
 
-    out = F.interpolate(image, target_image_size, mode = 'nearest')
+    scale_factors = target_image_size / orig_image_size
 
-    if exists(clamp_range):
-        out = out.clamp(*clamp_range)
+    if target_image_size < orig_image_size:
+        image = resize(image, scale_factors=scale_factors, pad_mode='reflect')
+    else:
+        image = resize(
+            image,
+            scale_factors=scale_factors,
+            interp_method=interp_methods.lanczos3,
+            antialiasing=False,
+            pad_mode='reflect')
 
-    return out
+    return image.clamp(*clamp_range)
 
 # image normalization functions
 # ddpms expect images to be in the range of -1 to 1
