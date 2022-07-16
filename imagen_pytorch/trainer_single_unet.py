@@ -1318,7 +1318,7 @@ class SingleUnetTrainer(nn.Module):
             output = yield
             return output
 
-        self.single_unet.eval()
+        self.ema_unet.eval()
         trainable_unet = self.single_unet.unet
         self.single_unet.unet = self.ema_unet.ema_model
 
@@ -1367,7 +1367,9 @@ class SingleUnetTrainer(nn.Module):
     @cast_torch_tensor
     @imagen_sample_in_chunks
     def sample(self, *args, **kwargs):
-        context = self.use_ema_unet if self.use_ema else nullcontext
+        context = (
+            self.use_ema_unet if not kwargs.pop("use_non_ema", False) else nullcontext
+        )
 
         with context():
             output = self.single_unet.sample(*args, **kwargs)
