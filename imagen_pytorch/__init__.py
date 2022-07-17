@@ -21,3 +21,7 @@ from imagen_pytorch.trainer_single_unet import (
     ElucidatedSingleUnet,
     SingleUnetTrainer,
 )
+
+# utils
+
+from imagen_pytorch.utils import load_imagen_from_checkpoint

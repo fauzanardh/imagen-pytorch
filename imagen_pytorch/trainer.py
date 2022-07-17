@@ -188,7 +188,8 @@ class ImagenTrainer(nn.Module):
 
     def __init__(
         self,
-        imagen,
+        imagen = None,
+        imagen_checkpoint_path = None,
         use_ema = True,
         lr = 1e-4,
         eps = 1e-8,
@@ -209,9 +210,19 @@ class ImagenTrainer(nn.Module):
     ):
         super().__init__()
         assert not ImagenTrainer.locked, 'ImagenTrainer can only be initialized once per process - for the sake of distributed training, you will now have to create a separate script to train each unet (or a script that accepts unet number as an argument)'
+        assert exists(imagen) ^ exists(imagen_checkpoint_path), 'either imagen instance is passed into the trainer, or a checkpoint path that contains the imagen config'
+
+        if exists(imagen_checkpoint_path):
+            checkpoint_path = Path(imagen_checkpoint_path)
+            assert checkpoint_path.exists()
+            loaded = torch.load(str(imagen_checkpoint_path))
 
         assert isinstance(imagen, (Imagen, ElucidatedImagen))
         ema_kwargs, kwargs = groupby_prefix_and_trim('ema_', kwargs)
+
+        # elucidated or not
+
+        self.is_elucidated = isinstance(imagen, ElucidatedImagen)
 
         # create accelerator instance
 
@@ -512,6 +523,19 @@ class ImagenTrainer(nn.Module):
 
         if self.use_ema:
             save_obj = {**save_obj, 'ema': self.ema_unets.state_dict()}
+
+        # determine if imagen config is available
+
+        if hasattr(self.imagen, '_config'):
+            self.print(f'this checkpoint is commandable from the CLI - "imagen --model {str(path)} \"<prompt>\""')
+
+            save_obj = {
+                **save_obj,
+                'imagen_type': 'elucidated' if self.is_elucidated else 'original',
+                'imagen_params': self.imagen._config
+            }
+
+        #save to path
 
         torch.save(save_obj, str(path))
         self.print(f'checkpoint saved to {str(path)}')

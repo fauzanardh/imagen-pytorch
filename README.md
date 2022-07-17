@@ -36,8 +36,6 @@ Please join <a href="https://discord.gg/xBPBXfcFHd"><img alt="Join us on Discord
 
 - <a href="https://github.com/BIGJUN777">BIGJUN</a> for catching a big bug with continuous time gaussian diffusion noise level conditioning at inference time
 
-- You? It isn't done yet, chip in if you are a researcher or skilled ML engineer
-
 ## Install
 
 ```bash
@@ -322,6 +320,65 @@ $ accelerate launch train.py
 
 That's it!
 
+## Command-line
+
+To further democratize the use of this machine imagination, I have built in the ability to generate an image with any text prompt using one command line as so
+
+ex.
+
+```bash
+$ imagen --model ./path/to/model/checkpoint.pt "a squirrel raiding the birdfeeder"
+# image is saved to ./a_squirrel_raiding_the_birdfeeder.png
+```
+
+In order to save checkpoints that can make use of this feature, you must instantiate your Imagen instance using the config classes, `ImagenConfig` and `ElucidatedImagenConfig`
+
+For proper training, you'll likely want to setup config-driven training anyways.
+
+ex.
+
+```python
+import torch
+from imagen_pytorch import ImagenConfig, ElucidatedImagenConfig, ImagenTrainer
+
+# in this example, using elucidated imagen
+
+imagen = ElucidatedImagenConfig(
+    unets = [
+        dict(dim = 32, dim_mults = (1, 2, 4, 8)),
+        dict(dim = 32, dim_mults = (1, 2, 4, 8))
+    ],
+    image_sizes = (64, 128),
+    cond_drop_prob = 0.5,
+    num_sample_steps = 32
+).create()
+
+trainer = ImagenTrainer(imagen)
+
+# do your training ...
+
+# then save it
+
+trainer.save('./checkpoint.pt')
+
+# you should see a message informing you that ./checkpoint.pt is commandable from the terminal
+```
+
+It really should be as simple as that
+
+You can also pass this checkpoint file around, and anyone can continue finetune on their own data
+
+```python
+from imagen_pytorch import load_imagen_from_checkpoint, ImagenTrainer
+
+imagen = load_imagen_from_checkpoint('./checkpoint.pt')
+
+trainer = ImagenTrainer(imagen)
+
+# continue training / fine-tuning
+```
+
+
 ## Experimental
 
 <a href="https://research.nvidia.com/person/tero-karras">Tero Karras</a> of StyleGAN fame has written a <a href="https://arxiv.org/abs/2206.00364">new paper</a> with results that have been corroborated by a number of independent researchers as well as on my own machine. I have decided to create a version of `Imagen`, the `ElucidatedImagen`, so that one can use the new elucidated DDPM for text-guided cascading generation.
@@ -404,9 +461,10 @@ Not at the moment but one will likely be trained and open sourced within the yea
 - [x] use primer's depthwise convs on the qkv projections in linear attention (or use token shifting before projections) - also use new dropout proposed by bayesformer, as it seems to work well with linear attention
 - [x] explore skip layer excitation in unet decoder
 - [x] accelerate integration
+- [x] build out CLI tool and one-line generation of image
+- [ ] build out CLI tool for training, resuming training off config file
 - [ ] knock out any issues that arised from accelerate
 - [ ] preencoding of text to memmapped embeddings
-- [ ] build out CLI tool for training, resuming training, and one-line generation of image
 - [ ] extend to video generation, using axial time attention as in Ho's video ddpm paper + https://github.com/lucidrains/flexible-diffusion-modeling-videos-pytorch for up to 25 minute video
 - [ ] add inpainting ability using resampler from repaint paper https://arxiv.org/abs/2201.09865
 - [ ] consider unet with attention mediating skip connections https://arxiv.org/abs/2109.04335
