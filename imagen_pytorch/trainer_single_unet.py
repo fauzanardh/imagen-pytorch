@@ -159,7 +159,7 @@ class SingleUnet(nn.Module):
         self.unnormalize_img = (
             unnormalize_zero_to_one if auto_normalize_img else identity
         )
-        self.input_image_range = (0.0 if auto_normalize_img else -1.0, 1.0)
+        self.input_image_range = (-1.0, 1.0)
 
         # dynamic thresholding
         self.dynamic_thresholding = dynamic_thresholding
