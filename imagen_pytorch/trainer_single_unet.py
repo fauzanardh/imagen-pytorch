@@ -383,6 +383,8 @@ class SingleUnet(nn.Module):
                 batch_size, lowres_sample_noise_level, device=device
             )
             lowres_cond_img = resize_image_to(lowres_cond_images, self.image_size)
+            # normalize image
+            lowres_cond_img = maybe(self.normalize_img)(lowres_cond_img)
             lowres_cond_img, _ = self.lowres_noise_schedule.q_sample(
                 x_start=lowres_cond_img,
                 t=lowres_noise_times,
@@ -902,6 +904,8 @@ class ElucidatedSingleUnet(nn.Module):
                 batch_size, lowres_sample_noise_level, device=device
             )
             lowres_cond_img = resize_image_to(lowres_cond_images, self.image_size)
+            # normalize image
+            lowres_cond_img = maybe(self.normalize_img)(lowres_cond_img)
             lowres_cond_img, _ = self.lowres_noise_schedule.q_sample(
                 x_start=lowres_cond_img,
                 t=lowres_noise_times,
