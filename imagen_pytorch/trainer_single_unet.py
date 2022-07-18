@@ -1233,8 +1233,10 @@ class SingleUnetTrainer(nn.Module):
 
     def prepare_all(self):
         if exists(self.train_dl):
+            self.train_dl = self.accelerator.prepare(self.train_dl)
             self.create_train_iter()
         if exists(self.valid_dl):
+            self.valid_dl = self.accelerator.prepare(self.valid_dl)
             self.create_valid_iter()
 
         self.optim = self.accelerator.prepare(self.optim)
