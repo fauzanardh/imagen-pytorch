@@ -14,7 +14,6 @@ import torch
 from torch import nn
 from torch.optim import Adam, AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.cuda.amp import GradScaler
 import torch.nn.functional as F
 import torchvision.transforms as T
 from accelerate import Accelerator, DistributedType, DistributedDataParallelKwargs
@@ -1076,7 +1075,7 @@ class SingleUnetTrainer(nn.Module):
         cosine_decay_max_steps=None,
         train_dl=None,
         valid_dl=None,
-        fp16=False,
+        amp=False,
         split_batches=True,
         dl_tuple_output_keywords_names=(
             "images",
@@ -1098,7 +1097,7 @@ class SingleUnetTrainer(nn.Module):
         self.accelerator = Accelerator(
             **{
                 "split_batches": split_batches,
-                "mixed_precision": "fp16" if fp16 else "no",
+                "mixed_precision": "fp16" if amp else "no",
                 "kwargs_handlers": [
                     DistributedDataParallelKwargs(find_unused_parameters=True)
                 ],
@@ -1107,7 +1106,6 @@ class SingleUnetTrainer(nn.Module):
         )
         SingleUnetTrainer.locked = self.is_distributed
 
-        grad_scaler_enabled = fp16
         self.single_unet = single_unet
         self.t5_encoder_name = t5_encoder_name
         self.verbose = verbose
@@ -1183,9 +1181,6 @@ class SingleUnetTrainer(nn.Module):
         if self.use_ema:
             self.ema_unet = EMA(single_unet.unet, **ema_kwargs)
 
-        scaler = GradScaler(enabled=grad_scaler_enabled)
-        self.scaler = scaler
-
         scheduler = warmup_scheduler = None
         if exists(cosine_decay_max_steps):
             scheduler = CosineAnnealingLR(optim, T_max=cosine_decay_max_steps)
@@ -1216,13 +1211,13 @@ class SingleUnetTrainer(nn.Module):
         if not exists(dl):
             return
         assert not exists(self.train_dl), "train dl already exists"
-        self.train_dl = self.accelerator.prepare(dl)
+        self.train_dl = dl
 
     def add_valid_dataloader(self, dl=None):
         if not exists(dl):
             return
         assert not exists(self.valid_dl), "valid dl already exists"
-        self.valid_dl = self.accelerator.prepare(dl)
+        self.valid_dl = dl
 
     def create_train_iter(self):
         assert exists(self.train_dl), "train dl does not exist"
@@ -1235,6 +1230,23 @@ class SingleUnetTrainer(nn.Module):
         if exists(self.valid_dl_iter):
             return
         self.valid_dl_iter = cycle(self.valid_dl)
+
+    def prepare_all(self):
+        if exists(self.train_dl):
+            self.create_train_iter()
+        if exists(self.valid_dl):
+            self.create_valid_iter()
+
+        self.optim = self.accelerator.prepare(self.optim)
+
+        self.single_unet = self.accelerator.prepare(self.single_unet)
+        if self.use_ema:
+            self.ema_unet = self.accelerator.prepare(self.ema_unet)
+
+    def unwrap_all(self):
+        self.single_unet = self.accelerator.unwrap_model(self.single_unet)
+        if self.use_ema:
+            self.ema_unet = self.accelerator.unwrap_model(self.ema_unet)
 
     def train_step(self, **kwargs):
         self.create_train_iter()
@@ -1264,7 +1276,6 @@ class SingleUnetTrainer(nn.Module):
         if exists(self.warmup_scheduler):
             save_obj["warmup"] = self.warmup_scheduler.state_dict()
 
-        save_obj["scaler"] = self.scaler.state_dict()
         save_obj["optimizer"] = self.optim.state_dict()
 
         if self.use_ema:
@@ -1288,7 +1299,6 @@ class SingleUnetTrainer(nn.Module):
         if exists(self.warmup_scheduler):
             self.warmup_scheduler.load_state_dict(loaded_obj["warmup"])
 
-        self.scaler.load_state_dict(loaded_obj["scaler"])
         self.optim.load_state_dict(loaded_obj["optimizer"])
 
         if self.use_ema:
@@ -1393,12 +1403,11 @@ class SingleUnetTrainer(nn.Module):
             split_size=max_batch_size,
             **kwargs,
         ):
-            with self.accelerator.autocast():
-                loss = self.single_unet(
-                    *chunked_args,
-                    **chunked_kwargs,
-                )
-                loss = loss * chunk_size_frac
+            loss = self.single_unet(
+                *chunked_args,
+                **chunked_kwargs,
+            )
+            loss = loss * chunk_size_frac
             total_loss += loss.item()
 
             if self.training:
