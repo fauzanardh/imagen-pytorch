@@ -1243,11 +1243,6 @@ class SingleUnetTrainer(nn.Module):
         if self.use_ema:
             self.ema_unet = self.accelerator.prepare(self.ema_unet)
 
-    def unwrap_all(self):
-        self.single_unet = self.accelerator.unwrap_model(self.single_unet)
-        if self.use_ema:
-            self.ema_unet = self.accelerator.unwrap_model(self.ema_unet)
-
     def train_step(self, **kwargs):
         self.create_train_iter()
         loss = self.step_with_dl_iter(self.train_dl_iter, **kwargs)
@@ -1265,7 +1260,7 @@ class SingleUnetTrainer(nn.Module):
         path.parent.mkdir(parents=True, exist_ok=True)
 
         save_obj = dict(
-            model=self.single_unet.state_dict(),
+            model=self.accelerator.unwrap_model(self.single_unet).state_dict(),
             version=__version__,
             step=self.steps.cpu(),
             **kwargs,
@@ -1279,7 +1274,7 @@ class SingleUnetTrainer(nn.Module):
         save_obj["optimizer"] = self.optim.state_dict()
 
         if self.use_ema:
-            save_obj["ema"] = self.ema_unet.state_dict()
+            save_obj["ema"] = self.accelerator.unwrap_model(self.ema_unet).state_dict()
 
         torch.save(save_obj, str(path))
 
