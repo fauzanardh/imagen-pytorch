@@ -1400,11 +1400,12 @@ class SingleUnetTrainer(nn.Module):
             split_size=max_batch_size,
             **kwargs,
         ):
-            loss = self.single_unet(
-                *chunked_args,
-                **chunked_kwargs,
-            )
-            loss = loss * chunk_size_frac
+            with self.accelerator.autocast():
+                loss = self.single_unet(
+                    *chunked_args,
+                    **chunked_kwargs,
+                )
+                loss = loss * chunk_size_frac
             total_loss += loss.item()
 
             if self.training:
