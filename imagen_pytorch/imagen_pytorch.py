@@ -12,7 +12,6 @@ import torch.nn.functional as F
 from torch import nn, einsum
 from torch.special import expm1
 import torchvision.transforms as T
-from torchvision.transforms.functional import InterpolationMode
 
 import kornia.augmentation as K
 from resize_right import resize, interp_methods
@@ -149,7 +148,7 @@ def resize_image_to(image, target_image_size, clamp_range=(-1, 1)):
         image = resize(
             image,
             scale_factors=scale_factors,
-            interp_method=InterpolationMode.LANCZOS,
+            interp_method=interp_methods.lanczos3,
             antialiasing=True,
             pad_mode='reflect')
 
