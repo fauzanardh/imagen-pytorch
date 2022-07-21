@@ -278,6 +278,10 @@ class GaussianDiffusion(nn.Module):
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
     def q_sample(self, x_start, t, noise = None):
+        if isinstance(t, int):
+            batch = x_start.shape[0]
+            t = torch.full((batch,), t, device=self.betas.device)
+
         noise = default(noise, lambda: torch.randn_like(x_start))
 
         noised = (
@@ -360,6 +364,9 @@ class GaussianDiffusionContinuousTimes(nn.Module):
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
     def q_sample(self, x_start, t, noise = None):
+        if isinstance(t, int):
+            batch = x_start.shape[0]
+            t = torch.full((batch,), t, device=self.betas.device, dtype=x_start.dtype)
         noise = default(noise, lambda: torch.randn_like(x_start))
         log_snr = self.log_snr(t)
         log_snr_padded_dim = right_pad_dims_to(x_start, log_snr)

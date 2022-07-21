@@ -296,6 +296,8 @@ class SingleUnet(nn.Module):
         lowres_noise_times=None,
         text_embeds=None,
         text_mask=None,
+        inpaint_images=None,
+        inpaint_masks=None,
         cond_images=None,
         cond_scale=1,
         pred_objective="noise",
@@ -307,10 +309,24 @@ class SingleUnet(nn.Module):
         img = torch.randn(shape, device=device)
         lowres_cond_img = maybe(self.normalize_img)(lowres_cond_img)
 
+        # inpainting
+        has_inpainting = exists(inpaint_images) and exists(inpaint_masks)
+        if has_inpainting:
+            inpaint_images = maybe(self.normalize_img)(inpaint_images)
+            inpaint_images = resize_image_to(inpaint_images, shape[-1])
+            inpaint_masks = resize_image_to(
+                rearrange(inpaint_masks, "b ... -> b 1 ...").float(), shape[-1]
+            ).bool()
+
         timesteps = noise_scheduler.get_sampling_timesteps(batch, device=device)
         for times, times_next in tqdm(
             timesteps, desc="sampling loop time step", total=len(timesteps)
         ):
+            if has_inpainting:
+                noised_inpaint_images, _ = noise_scheduler.q_sample(
+                    inpaint_images, t=times
+                )
+                img = img * ~inpaint_images + noised_inpaint_images * inpaint_masks
             img = self.p_sample(
                 unet,
                 img,
@@ -328,6 +344,8 @@ class SingleUnet(nn.Module):
             )
 
         img.clamp_(-1.0, 1.0)
+        if has_inpainting:
+            img = img * ~inpaint_masks + inpaint_images * inpaint_masks
         return self.unnormalize_img(img)
 
     @torch.no_grad()
@@ -337,6 +355,8 @@ class SingleUnet(nn.Module):
         texts=None,
         text_masks=None,
         text_embeds=None,
+        inpaint_images=None,
+        inpaint_masks=None,
         cond_images=None,
         lowres_cond_images=None,
         batch_size=1,
@@ -365,6 +385,9 @@ class SingleUnet(nn.Module):
         assert not (
             exists(text_embeds) and text_embeds.size(-1) != self.text_embed_dim
         ), f"text_embeds must have shape (batch_size, {self.text_embed_dim})"
+        assert not (
+            exists(inpaint_images) ^ exists(inpaint_masks)
+        ), "inpaint_images and inpaint_masks must be provided together"
 
         outputs = []
 
@@ -395,6 +418,8 @@ class SingleUnet(nn.Module):
             shape,
             text_embeds=text_embeds,
             text_mask=text_masks,
+            inpaint_images=inpaint_images,
+            inpaint_masks=inpaint_masks,
             cond_images=cond_images,
             cond_scale=cond_scale,
             lowres_cond_img=lowres_cond_img,
@@ -771,6 +796,8 @@ class ElucidatedSingleUnet(nn.Module):
         clamp=True,
         dynamic_threshold=True,
         cond_scale=1.0,
+        inpaint_images=None,
+        inpaint_masks=None,
         **kwargs,
     ):
         # get specific sampling hyperparameters for unet
@@ -797,6 +824,15 @@ class ElucidatedSingleUnet(nn.Module):
 
         images = init_sigma * torch.randn(shape, device=self.device)
 
+        # inpainting
+        has_inpainting = exists(inpaint_images) and exists(inpaint_masks)
+        if has_inpainting:
+            inpaint_images = maybe(self.normalize_img)(inpaint_images)
+            inpaint_images = resize_image_to(inpaint_images, shape[-1])
+            inpaint_masks = resize_image_to(
+                rearrange(inpaint_masks, "b ... -> b 1 ...").float(), shape[-1]
+            ).bool()
+
         # unet kwargs
 
         unet_kwargs = dict(
@@ -821,7 +857,14 @@ class ElucidatedSingleUnet(nn.Module):
             )  # stochastic sampling
 
             sigma_hat = sigma + gamma * sigma
-            images_hat = images + sqrt(sigma_hat**2 - sigma**2) * eps
+            added_noise = sqrt(sigma_hat**2 - sigma**2) * eps
+            images_hat = images + added_noise
+
+            if has_inpainting:
+                images_hat = (
+                    images_hat * ~inpaint_masks
+                    + (inpaint_images + added_noise) * inpaint_masks
+                )
 
             model_output = self.preconditioned_network_forward(
                 unet.forward_with_cond_scale, images_hat, sigma_hat, **unet_kwargs
@@ -848,6 +891,8 @@ class ElucidatedSingleUnet(nn.Module):
             images = images_next
 
         images = images.clamp(-1.0, 1.0)
+        if has_inpainting:
+            images = images * ~inpaint_masks + inpaint_images * inpaint_masks
         return self.unnormalize_img(images)
 
     @torch.no_grad()
@@ -857,6 +902,8 @@ class ElucidatedSingleUnet(nn.Module):
         texts=None,
         text_masks=None,
         text_embeds=None,
+        inpaint_images=None,
+        inpaint_masks=None,
         cond_images=None,
         lowres_cond_images=None,
         batch_size=1,
@@ -885,6 +932,10 @@ class ElucidatedSingleUnet(nn.Module):
         assert not (
             exists(text_embeds) and text_embeds.shape[-1] != self.text_embed_dim
         ), f"invalid text embedding dimension being passed in (should be {self.text_embed_dim})"
+
+        assert not (
+            exists(inpaint_images) ^ exists(inpaint_masks)
+        ), "inpaint images and masks must be passed together"
 
         outputs = []
         device = next(self.parameters()).device
@@ -917,6 +968,8 @@ class ElucidatedSingleUnet(nn.Module):
             unet_number=self.unet_num,
             text_embeds=text_embeds,
             text_mask=text_masks,
+            inpaint_images=inpaint_images,
+            inpaint_masks=inpaint_masks,
             cond_images=cond_images,
             cond_scale=cond_scale,
             lowres_cond_img=lowres_cond_img,
@@ -1284,7 +1337,7 @@ class SingleUnetTrainer(nn.Module):
         path = Path(path)
         assert path.exists()
 
-        loaded_obj = torch.load(str(path))
+        loaded_obj = torch.load(str(path), map_location="cpu")
 
         self.single_unet.load_state_dict(loaded_obj["model"], strict=strict)
 
