@@ -3,7 +3,7 @@ from functools import partial
 from contextlib import contextmanager, nullcontext
 from typing import List
 from collections import namedtuple
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 import torch
 import torch.nn.functional as F
