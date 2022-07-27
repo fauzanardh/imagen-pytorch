@@ -1,7 +1,7 @@
 import torch
 import transformers
 from typing import List
-from transformers import T5Tokenizer, T5EncoderModel, T5Config
+from transformers import T5FastTokenizer, T5EncoderModel, T5Config
 from einops import rearrange
 
 transformers.logging.set_verbosity_error()
@@ -25,7 +25,7 @@ T5_CONFIGS = {}
 # singleton globals
 
 def get_tokenizer(name):
-    tokenizer = T5Tokenizer.from_pretrained(name)
+    tokenizer = T5FastTokenizer.from_pretrained(name)
     return tokenizer
 
 def get_model(name):
