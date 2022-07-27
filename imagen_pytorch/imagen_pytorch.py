@@ -1103,7 +1103,8 @@ class Unet(nn.Module):
         final_conv_kernel_size = 3,
         cosine_sim_attn = False,
         combine_upsample_fmaps = False,      # combine feature maps from all upsample blocks, used in unet squared successfully
-        pixel_shuffle_upsample = True        # may address checkboard artifacts
+        pixel_shuffle_upsample = True,       # may address checkboard artifacts
+        patch_size = 1,                      # patched diffusion
     ):
         super().__init__()
 
@@ -1134,6 +1135,15 @@ class Unet(nn.Module):
         self.cond_images_channels = cond_images_channels
 
         init_channels += cond_images_channels
+
+        # patched diffusion
+
+        self.patch_size = patch_size
+        init_channels = init_channels * self.patch_size ** 2
+        self.channels_out = self.channels_out * self.patch_size ** 2
+        if self.patch_size > 1:
+            self.patched_diff_downscale = nn.PixelUnshuffle(self.patch_size)
+            self.patched_diff_upscale = nn.PixelShuffle(self.patch_size)
 
         # initial convolution
 
@@ -1478,6 +1488,11 @@ class Unet(nn.Module):
             cond_images = resize_image_to(cond_images, x.shape[-1])
             x = torch.cat((cond_images, x), dim = 1)
 
+        # patched diffusion downscale
+
+        if self.patch_size > 1:
+            x = self.patched_diff_downscale(x)
+
         # initial convolution
 
         x = self.init_conv(x)
@@ -1641,7 +1656,13 @@ class Unet(nn.Module):
         if exists(lowres_cond_img):
             x = torch.cat((x, lowres_cond_img), dim = 1)
 
-        return self.final_conv(x)
+        x = self.final_conv(x)
+
+        # patched diffusion upscale
+        if self.patch_size > 1:
+            x = self.patched_diff_upscale(x)
+        
+        return x
 
 # predefined unets, with configs lining up with hyperparameters in appendix of paper
 
