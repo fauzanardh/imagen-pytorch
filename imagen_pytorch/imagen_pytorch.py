@@ -581,7 +581,7 @@ class PixelShuffleUpsample(nn.Module):
         conv_weight = repeat(conv_weight, 'o ... -> (o 4) ...')
 
         conv.weight.data.copy_(conv_weight)
-        nn.init.zeros_(conv.bias.data)
+        # nn.init.zeros_(conv.bias.data) # bias = False so no need to initialize
 
     def forward(self, x):
         return self.net(x)
