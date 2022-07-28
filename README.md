@@ -261,7 +261,7 @@ ex. unconditional training
 
 ```python
 from imagen_pytorch import Unet, Imagen, ImagenTrainer
-from imagen_pytorch.data import get_images_dataloader
+from imagen_pytorch.data import Dataset
 
 # unets for unconditional imagen
 
@@ -282,19 +282,26 @@ imagen = Imagen(
     timesteps = 1000
 )
 
-trainer = ImagenTrainer(imagen).cuda()
+trainer = ImagenTrainer(
+    imagen = imagen,
+    split_valid_from_train = True # whether to split the validation dataset from the training
+).cuda()
 
 # instantiate your dataloader, which returns the necessary inputs to the DDPM as tuple in the order of images, text embeddings, then text masks. in this case, only images is returned as it is unconditional training
 
-train_dl = get_images_dataloader('/path/to/training/images', batch_size = 16, image_size = 128)
+dataset = Dataset('/path/to/training/images', image_size = 128)
 
-trainer.add_train_dataloader(train_dl)
+trainer.add_train_dataset(dataset, batch_size = 16)
 
 # working training loop
 
 for i in range(200000):
     loss = trainer.train_step(unet_number = 1, max_batch_size = 4)
     print(f'loss: {loss}')
+
+    if not (i % 50):
+        valid_loss = trainer.valid_step(unet_number = 1, max_batch_size = 4)
+        print(f'valid loss: {valid_loss}')
 
     if not (i % 100) and trainer.is_main: # is_main makes sure this can run in distributed
         images = trainer.sample(batch_size = 1, return_pil_images = True) # returns List[Image]
@@ -378,6 +385,24 @@ trainer = ImagenTrainer(imagen)
 # continue training / fine-tuning
 ```
 
+## Inpainting
+
+Inpainting follows the formulation laid out by the recent <a href="https://arxiv.org/abs/2201.09865">Repaint paper</a>. Simply pass in `inpaint_images` and `inpaint_masks` to the `sample` function on either `Imagen` or `ElucidatedImagen`
+
+```python
+
+inpaint_images = torch.randn(4, 3, 512, 512).cuda()      # (batch, channels, height, width)
+inpaint_masks = torch.ones((4, 512, 512)).bool().cuda()  # (batch, height, width)
+
+inpainted_images = trainer.sample(texts = [
+    'a whale breaching from afar',
+    'young girl blowing out candles on her birthday cake',
+    'fireworks with blue and green sparkles',
+    'fireworks with blue and green sparkles'
+], inpaint_images = inpaint_images, inpaint_masks = inpaint_masks, cond_scale = 5.)
+
+inpainted_images # (4, 3, 512, 512)
+```
 
 ## Experimental
 
@@ -431,6 +456,10 @@ trainer.sample(texts = [
 
 Not at the moment but one will likely be trained and open sourced within the year, if not sooner. If you would like to participate, you can join the community of artificial neural network trainers at Laion (discord link is in the Readme above) and start collaborating.
 
+- Will this technology take my job?
+
+More the reason why you should start training your own model, starting today! The last thing we need is this technology being in the hands of an elite few. Hopefully this repository reduces the work to just finding the necessary compute, and augmenting with your own curated dataset.
+
 ## Related Works
 
 - <a href="https://github.com/archinetai/audio-diffusion-pytorch">Audio diffusion</a> from <a href="https://github.com/flavioschneider">Flavio Schneider</a>
@@ -462,13 +491,15 @@ Not at the moment but one will likely be trained and open sourced within the yea
 - [x] explore skip layer excitation in unet decoder
 - [x] accelerate integration
 - [x] build out CLI tool and one-line generation of image
+- [x] knock out any issues that arised from accelerate
+- [x] add inpainting ability using resampler from repaint paper https://arxiv.org/abs/2201.09865
+- [x] build a simple checkpointing system, backed by a folder
+- [x] add skip connection from outputs of all upsample blocks, used in unet squared paper and some previous unet works
+- [x] add fsspec, recommended by Romain @rom1504, for cloud / local file system agnostic persistence of checkpoints
+- [ ] test out persistence in gcs with https://github.com/fsspec/gcsfs
 - [ ] build out CLI tool for training, resuming training off config file
-- [ ] knock out any issues that arised from accelerate
 - [ ] preencoding of text to memmapped embeddings
 - [ ] extend to video generation, using axial time attention as in Ho's video ddpm paper + https://github.com/lucidrains/flexible-diffusion-modeling-videos-pytorch for up to 25 minute video
-- [ ] add inpainting ability using resampler from repaint paper https://arxiv.org/abs/2201.09865
-- [ ] consider unet with attention mediating skip connections https://arxiv.org/abs/2109.04335
-- [ ] if memory efficient unet is defective, consider https://arxiv.org/abs/1906.06148
 - [ ] be able to create dataloader iterators based on the old epoch style, also configure shuffling etc
 - [ ] be able to also pass in arguments (instead of requiring forward to be all keyword args on model)
 
@@ -550,5 +581,15 @@ Not at the moment but one will likely be trained and open sourced within the yea
     url         = {https://proceedings.neurips.cc/paper/2020/file/4c5bcfec8584af0d967f1ab10179ca4b-Paper.pdf},
     volume      = {33},
     year        = {2020}
+}
+```
+
+```bibtex
+@article{Lugmayr2022RePaintIU,
+    title   = {RePaint: Inpainting using Denoising Diffusion Probabilistic Models},
+    author  = {Andreas Lugmayr and Martin Danelljan and Andr{\'e}s Romero and Fisher Yu and Radu Timofte and Luc Van Gool},
+    journal = {ArXiv},
+    year    = {2022},
+    volume  = {abs/2201.09865}
 }
 ```
