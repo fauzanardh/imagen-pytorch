@@ -1,3 +1,4 @@
+import os
 import time
 import copy
 from pathlib import Path
@@ -9,8 +10,9 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.utils.data import random_split, DataLoader
 from torch.optim import Adam
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 from torch.cuda.amp import autocast, GradScaler
 
 import pytorch_warmup as warmup
@@ -28,13 +30,18 @@ from ema_pytorch import EMA
 
 from accelerate import Accelerator, DistributedType, DistributedDataParallelKwargs
 
+from fsspec.core import url_to_fs
+from fsspec.implementations.local import LocalFileSystem
+
 # helper functions
 
 def exists(val):
     return val is not None
 
 def default(val, d):
-    return val if exists(val) else d
+    if exists(val):
+        return val
+    return d() if callable(d) else d
 
 def cast_tuple(val, length = 1):
     if isinstance(val, list):
@@ -78,6 +85,19 @@ def num_to_groups(num, divisor):
     if remainder > 0:
         arr.append(remainder)
     return arr
+
+# url to fs, bucket, path - for checkpointing to cloud
+
+def url_to_bucket(url):
+    if '://' not in url:
+        return url
+
+    _, suffix = url.split('://')
+
+    if prefix in {'gs', 's3'}:
+        return suffix.split('/')[0]
+    else:
+        raise ValueError(f'storage type prefix "{prefix}" is not supported yet')
 
 # decorators
 
@@ -200,22 +220,31 @@ class ImagenTrainer(nn.Module):
         warmup_steps = None,
         cosine_decay_max_steps = None,
         only_train_unet_number = None,
-        train_dl = None,
-        valid_dl = None,
         fp16 = False,
         split_batches = True,
         dl_tuple_output_keywords_names = ('images', 'text_embeds', 'text_masks', 'cond_images'),
         verbose = True,
+        split_valid_fraction = 0.025,
+        split_valid_from_train = False,
+        split_random_seed = 42,
+        checkpoint_path = None,
+        checkpoint_every = None,
+        checkpoint_fs = None,
+        fs_kwargs: dict = None,
+        max_checkpoints_keep = 20,
         **kwargs
     ):
         super().__init__()
         assert not ImagenTrainer.locked, 'ImagenTrainer can only be initialized once per process - for the sake of distributed training, you will now have to create a separate script to train each unet (or a script that accepts unet number as an argument)'
         assert exists(imagen) ^ exists(imagen_checkpoint_path), 'either imagen instance is passed into the trainer, or a checkpoint path that contains the imagen config'
 
-        if exists(imagen_checkpoint_path):
-            checkpoint_path = Path(imagen_checkpoint_path)
-            assert checkpoint_path.exists()
-            loaded = torch.load(str(imagen_checkpoint_path))
+        # determine filesystem, using fsspec, for saving to local filesystem or cloud
+
+        self.fs = checkpoint_fs
+
+        if not exists(self.fs):
+            fs_kwargs = default(fs_kwargs, {})
+            self.fs, _ = url_to_fs(default(checkpoint_path, './'), **fs_kwargs)
 
         assert isinstance(imagen, (Imagen, ElucidatedImagen))
         ema_kwargs, kwargs = groupby_prefix_and_trim('ema_', kwargs)
@@ -263,8 +292,13 @@ class ImagenTrainer(nn.Module):
 
         self.dl_tuple_output_keywords_names = dl_tuple_output_keywords_names
 
-        self.add_train_dataloader(train_dl)
-        self.add_valid_dataloader(valid_dl)
+        # auto splitting validation from training, if dataset is passed in
+
+        self.split_valid_from_train = split_valid_from_train
+
+        assert 0 <= split_valid_fraction <= 1, 'split valid fraction must be between 0 and 1'
+        self.split_valid_fraction = split_valid_fraction
+        self.split_random_seed = split_random_seed
 
         # be able to finely customize learning rate, weight decay
         # per unet
@@ -293,6 +327,9 @@ class ImagenTrainer(nn.Module):
             if exists(unet_warmup_steps):
                 warmup_scheduler = warmup.LinearWarmup(optimizer, warmup_period = unet_warmup_steps)
 
+                if not exists(scheduler):
+                    scheduler = LambdaLR(optimizer, lr_lambda = lambda step: 1.0)
+
             # set on object
 
             setattr(self, f'optim{ind}', optimizer) # cannot use pytorch ModuleList for some reason with optimizers
@@ -314,6 +351,23 @@ class ImagenTrainer(nn.Module):
 
         self.imagen.to(self.device)
         self.to(self.device)
+
+        # checkpointing
+
+        assert not (exists(checkpoint_path) ^ exists(checkpoint_every))
+        self.checkpoint_path = checkpoint_path
+        self.checkpoint_every = checkpoint_every
+        self.max_checkpoints_keep = max_checkpoints_keep
+
+        self.can_checkpoint = self.is_local_main if isinstance(checkpoint_fs, LocalFileSystem) else self.is_main
+
+        if exists(checkpoint_path) and self.can_checkpoint:
+            bucket = url_to_bucket(checkpoint_path)
+
+            if not self.fs.exists(bucket):
+                self.fs.mkdir(bucket)
+
+            self.load_from_checkpoint_folder()
 
         # only allowing training for unet
 
@@ -341,6 +395,16 @@ class ImagenTrainer(nn.Module):
     @property
     def unwrapped_unet(self):
         return self.accelerator.unwrap_model(self.unet_being_trained)
+
+    # optimizer helper functions
+
+    def get_lr(self, unet_number):
+        self.validate_unet_number(unet_number)
+        unet_index = unet_number - 1
+
+        optim = getattr(self, f'optim{unet_index}')
+
+        return optim.param_groups[0]['lr']
 
     # function for allowing only one unet from being trained at a time
 
@@ -442,6 +506,37 @@ class ImagenTrainer(nn.Module):
         assert not exists(self.valid_dl), 'validation dataloader was already added'
         self.valid_dl = self.accelerator.prepare(dl)
 
+    def add_train_dataset(self, ds = None, *, batch_size, **dl_kwargs):
+        if not exists(ds):
+            return
+
+        assert not exists(self.train_dl), 'training dataloader was already added'
+
+        valid_ds = None
+        if self.split_valid_from_train:
+            train_size = int((1 - self.split_valid_fraction) * len(ds))
+            valid_size = len(ds) - train_size
+
+            ds, valid_ds = random_split(ds, [train_size, valid_size], generator = torch.Generator().manual_seed(self.split_random_seed))
+            self.print(f'training with dataset of {len(ds)} samples and validating with randomly splitted {len(valid_ds)} samples')
+
+        dl = DataLoader(ds, batch_size = batch_size, **dl_kwargs)
+        self.train_dl = self.accelerator.prepare(dl)
+
+        if not self.split_valid_from_train:
+            return
+
+        self.add_valid_dataset(valid_ds, batch_size = batch_size, **dl_kwargs)
+
+    def add_valid_dataset(self, ds, *, batch_size, **dl_kwargs):
+        if not exists(ds):
+            return
+
+        assert not exists(self.valid_dl), 'validation dataloader was already added'
+
+        dl = DataLoader(ds, batch_size = batch_size, **dl_kwargs)
+        self.valid_dl = self.accelerator.prepare(dl)
+
     def create_train_iter(self):
         assert exists(self.train_dl), 'training dataloader has not been registered with the trainer yet'
 
@@ -481,17 +576,61 @@ class ImagenTrainer(nn.Module):
         loss = self.forward(**{**kwargs, **model_input})
         return loss
 
+    # checkpointing functions
+
+    @property
+    def all_checkpoints_sorted(self):
+        glob_pattern = os.path.join(self.checkpoint_path, '*.pt')
+        checkpoints = self.fs.glob(glob_pattern)
+        sorted_checkpoints = sorted(checkpoints, key = lambda x: int(str(x).split('.')[-2]), reverse = True)
+        return sorted_checkpoints
+
+    def load_from_checkpoint_folder(self, last_total_steps = -1):
+        if last_total_steps != -1:
+            filepath = os.path.join(self.checkpoint_path, f'checkpoint.{last_total_steps}.pt')
+            self.load(filepath)
+            return
+
+        sorted_checkpoints = self.all_checkpoints_sorted
+
+        if len(sorted_checkpoints) == 0:
+            self.print(f'no checkpoints found to load from at {self.checkpoint_path}')
+            return
+
+        last_checkpoint = sorted_checkpoints[0]
+        self.load(last_checkpoint)
+
+    def save_to_checkpoint_folder(self):
+        self.accelerator.wait_for_everyone()
+
+        if not self.can_checkpoint:
+            return
+
+        total_steps = int(self.steps.sum().item())
+        filepath = os.path.join(self.checkpoint_path, f'checkpoint.{total_steps}.pt')
+
+        self.save(filepath)
+
+        if self.max_checkpoints_keep <= 0:
+            return
+
+        sorted_checkpoints = self.all_checkpoints_sorted
+        checkpoints_to_discard = sorted_checkpoints[self.max_checkpoints_keep:]
+
+        for checkpoint in checkpoints_to_discard:
+            self.fs.rm(checkpoint)
+
     # saving and loading functions
 
     def save(self, path, overwrite = True, **kwargs):
         self.accelerator.wait_for_everyone()
 
-        if not self.is_local_main:
+        if not self.can_checkpoint:
             return
 
-        path = Path(path)
-        assert not (path.exists() and not overwrite)
-        path.parent.mkdir(parents = True, exist_ok = True)
+        fs = self.fs
+
+        assert not (fs.exists(path) and not overwrite)
 
         self.reset_ema_unets_all_one_device()
 
@@ -537,21 +676,26 @@ class ImagenTrainer(nn.Module):
 
         #save to path
 
-        torch.save(save_obj, str(path))
-        self.print(f'checkpoint saved to {str(path)}')
+        with fs.open(path, 'wb') as f:
+            torch.save(save_obj, f)
+
+        self.print(f'checkpoint saved to {path}')
 
     def load(self, path, only_model = False, strict = True, noop_if_not_exist = False):
-        path = Path(path)
+        fs = self.fs
 
-        if noop_if_not_exist and not path.exists():
+        if noop_if_not_exist and not fs.exists(path):
             self.print(f'trainer checkpoint not found at {str(path)}')
             return
 
-        assert path.exists()
+        assert fs.exists(path), f'{path} does not exist'
 
         self.reset_ema_unets_all_one_device()
 
-        loaded_obj = torch.load(str(path))
+        # to avoid extra GPU memory usage in main process when using Accelerate
+
+        with fs.open(path) as f:
+            loaded_obj = torch.load(f, map_location='cpu')
 
         if version.parse(__version__) != version.parse(loaded_obj['version']):
             self.print(f'loading saved imagen at version {loaded_obj["version"]}, but current package version is {__version__}')
@@ -589,7 +733,7 @@ class ImagenTrainer(nn.Module):
             assert 'ema' in loaded_obj
             self.ema_unets.load_state_dict(loaded_obj['ema'], strict = strict)
 
-        self.print(f'checkpoint loaded from {str(path)}')
+        self.print(f'checkpoint loaded from {path}')
         return loaded_obj
 
     # managing ema unets and their devices
@@ -717,6 +861,16 @@ class ImagenTrainer(nn.Module):
                 scheduler.step()
 
         self.steps += F.one_hot(torch.tensor(unet_number - 1, device = self.steps.device), num_classes = len(self.steps))
+
+        if not exists(self.checkpoint_path):
+            return
+
+        total_steps = int(self.steps.sum().item())
+
+        if total_steps % self.checkpoint_every:
+            return
+
+        self.save_to_checkpoint_folder()
 
     @torch.no_grad()
     @cast_torch_tensor

@@ -10,6 +10,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 from torch import nn, einsum
+from torch.cuda.amp import autocast
 from torch.special import expm1
 import torchvision.transforms as T
 
@@ -173,133 +174,6 @@ def prob_mask_like(shape, prob, device):
     else:
         return torch.zeros(shape, device = device).float().uniform_(0, 1) < prob
 
-# gaussian diffusion helper functions
-
-def extract(a, t, x_shape):
-    b, *_ = t.shape
-    out = a.gather(-1, t)
-    return out.reshape(b, *((1,) * (len(x_shape) - 1)))
-
-def cosine_beta_schedule(timesteps, s = 0.008, thres = 0.999):
-    """
-    cosine schedule
-    as proposed in https://openreview.net/forum?id=-NEXDKk8gZ
-    """
-    steps = timesteps + 1
-    x = torch.linspace(0, timesteps, steps, dtype = torch.float64)
-    alphas_cumprod = torch.cos(((x / timesteps) + s) / (1 + s) * torch.pi * 0.5) ** 2
-    alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
-    betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
-    return torch.clip(betas, 0, thres)
-
-def linear_beta_schedule(timesteps):
-    scale = 1000 / timesteps
-    beta_start = scale * 0.0001
-    beta_end = scale * 0.02
-    return torch.linspace(beta_start, beta_end, timesteps, dtype = torch.float64)
-
-class GaussianDiffusion(nn.Module):
-    def __init__(
-        self,
-        *,
-        noise_schedule,
-        timesteps
-    ):
-        super().__init__()
-
-        if noise_schedule == "cosine":
-            betas = cosine_beta_schedule(timesteps)
-        elif noise_schedule == "linear":
-            betas = linear_beta_schedule(timesteps)
-        else:
-            raise NotImplementedError()
-
-        alphas = 1. - betas
-        alphas_cumprod = torch.cumprod(alphas, axis = 0)
-        alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value = 1.)
-
-        timesteps, = betas.shape
-        self.num_timesteps = int(timesteps)
-
-        # register buffer helper function to cast double back to float
-
-        register_buffer = lambda name, val: self.register_buffer(name, val.to(torch.float32), persistent = False)
-
-        register_buffer('betas', betas)
-        register_buffer('alphas_cumprod', alphas_cumprod)
-        register_buffer('alphas_cumprod_prev', alphas_cumprod_prev)
-
-        # calculations for diffusion q(x_t | x_{t-1}) and others
-
-        register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod))
-        register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1. - alphas_cumprod))
-        register_buffer('log_one_minus_alphas_cumprod', torch.log(1. - alphas_cumprod))
-        register_buffer('sqrt_recip_alphas_cumprod', torch.sqrt(1. / alphas_cumprod))
-        register_buffer('sqrt_recipm1_alphas_cumprod', torch.sqrt(1. / alphas_cumprod - 1))
-
-        # calculations for posterior q(x_{t-1} | x_t, x_0)
-
-        posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
-
-        # above: equal to 1. / (1. / (1. - alpha_cumprod_tm1) + alpha_t / beta_t)
-
-        register_buffer('posterior_variance', posterior_variance)
-
-        # below: log calculation clipped because the posterior variance is 0 at the beginning of the diffusion chain
-
-        register_buffer('posterior_log_variance_clipped', log(posterior_variance, eps = 1e-20))
-        register_buffer('posterior_mean_coef1', betas * torch.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod))
-        register_buffer('posterior_mean_coef2', (1. - alphas_cumprod_prev) * torch.sqrt(alphas) / (1. - alphas_cumprod))
-
-    def get_times(self, batch_size, noise_level, *, device):
-        return torch.full((batch_size,), int(self.num_timesteps * noise_level), device = device, dtype = torch.long)
-
-    def sample_random_times(self, batch_size, *, device):
-        return torch.randint(0, self.num_timesteps, (batch_size,), device = device, dtype = torch.long)
-
-    def get_condition(self, times):
-        return times
-
-    def get_sampling_timesteps(self, batch, *, device):
-        time_transitions = []
-
-        for i in reversed(range(self.num_timesteps)):
-            time_transitions.append((torch.full((batch,), i, device = device, dtype = torch.long), None))
-
-        return time_transitions
-
-    def q_posterior(self, x_start, x_t, t, **kwargs):
-        posterior_mean = (
-            extract(self.posterior_mean_coef1, t, x_t.shape) * x_start +
-            extract(self.posterior_mean_coef2, t, x_t.shape) * x_t
-        )
-        posterior_variance = extract(self.posterior_variance, t, x_t.shape)
-        posterior_log_variance_clipped = extract(self.posterior_log_variance_clipped, t, x_t.shape)
-        return posterior_mean, posterior_variance, posterior_log_variance_clipped
-
-    def q_sample(self, x_start, t, noise = None):
-        if isinstance(t, int):
-            batch = x_start.shape[0]
-            t = torch.full((batch,), t, device=self.betas.device)
-
-        noise = default(noise, lambda: torch.randn_like(x_start))
-
-        noised = (
-            extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
-            extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
-        )
-
-        alphas_cumprod = extract(self.alphas_cumprod, t, t.shape)
-        log_snr = -log(1. / alphas_cumprod - 1)
-
-        return noised, log_snr
-
-    def predict_start_from_noise(self, x_t, t, noise):
-        return (
-            extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -
-            extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
-        )
-
 # gaussian diffusion with continuous time helper functions and classes
 # large part of this was thanks to @crowsonkb at https://github.com/crowsonkb/v-diffusion-jax/blob/master/diffusion/utils.py
 
@@ -364,14 +238,37 @@ class GaussianDiffusionContinuousTimes(nn.Module):
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
     def q_sample(self, x_start, t, noise = None):
-        if isinstance(t, int):
+        if isinstance(t, float):
             batch = x_start.shape[0]
-            t = torch.full((batch,), t, device=self.betas.device, dtype=x_start.dtype)
+            t = torch.full((batch,), t, device = x_start.device, dtype = x_start.dtype)
+
         noise = default(noise, lambda: torch.randn_like(x_start))
         log_snr = self.log_snr(t)
         log_snr_padded_dim = right_pad_dims_to(x_start, log_snr)
         alpha, sigma =  log_snr_to_alpha_sigma(log_snr_padded_dim)
         return alpha * x_start + sigma * noise, log_snr
+
+    def q_sample_from_to(self, x_from, from_t, to_t, noise = None):
+        shape, device, dtype = x_from.shape, x_from.device, x_from.dtype
+        batch = shape[0]
+
+        if isinstance(from_t, float):
+            from_t = torch.full((batch,), from_t, device = device, dtype = dtype)
+
+        if isinstance(to_t, float):
+            to_t = torch.full((batch,), to_t, device = device, dtype = dtype)
+
+        noise = default(noise, lambda: torch.randn_like(x_from))
+
+        log_snr = self.log_snr(from_t)
+        log_snr_padded_dim = right_pad_dims_to(x_from, log_snr)
+        alpha, sigma =  log_snr_to_alpha_sigma(log_snr_padded_dim)
+
+        log_snr_to = self.log_snr(from_t)
+        log_snr_padded_dim_to = right_pad_dims_to(x_from, log_snr_to)
+        alpha_to, sigma_to =  log_snr_to_alpha_sigma(log_snr_padded_dim_to)
+
+        return x_from * (alpha_to / alpha) + noise * (sigma_to * alpha - sigma * alpha_to) / alpha
 
     def predict_start_from_noise(self, x_t, t, noise):
         log_snr = self.log_snr(t)
@@ -382,22 +279,31 @@ class GaussianDiffusionContinuousTimes(nn.Module):
 # norms and residuals
 
 class LayerNorm(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.gamma = nn.Parameter(torch.ones(dim))
-        self.register_buffer('beta', torch.zeros(dim))
-
-    def forward(self, x):
-        return F.layer_norm(x, x.shape[-1:], self.gamma, self.beta)
-
-
-class ChanLayerNorm(nn.Module):
-    def __init__(self, dim, eps = 1e-5):
+    def __init__(self, dim, eps = 1e-5, stable = False):
         super().__init__()
         self.eps = eps
+        self.stable = stable
+        self.g = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        if self.stable:
+            x = x / x.amax(dim = -1, keepdim = True).detach()
+
+        var = torch.var(x, dim = -1, unbiased = False, keepdim = True)
+        mean = torch.mean(x, dim = -1, keepdim = True)
+        return (x - mean) * (var + self.eps).rsqrt() * self.g
+
+class ChanLayerNorm(nn.Module):
+    def __init__(self, dim, eps = 1e-5, stable = False):
+        super().__init__()
+        self.eps = eps
+        self.stable = stable
         self.g = nn.Parameter(torch.ones(1, dim, 1, 1))
 
     def forward(self, x):
+        if self.stable:
+            x = x / x.amax(dim = 1, keepdim = True).detach()
+
         var = torch.var(x, dim = 1, unbiased = False, keepdim = True)
         mean = torch.mean(x, dim = 1, keepdim = True)
         return (x - mean) / (var + self.eps).sqrt() * self.g
@@ -434,10 +340,14 @@ class PerceiverAttention(nn.Module):
         *,
         dim,
         dim_head = 64,
-        heads = 8
+        heads = 8,
+        cosine_sim_attn = False
     ):
         super().__init__()
-        self.scale = dim_head ** -0.5
+        self.scale = dim_head ** -0.5 if not cosine_sim_attn else 1
+        self.cosine_sim_attn = cosine_sim_attn
+        self.cosine_sim_scale = 16 if cosine_sim_attn else 1
+
         self.heads = heads
         inner_dim = dim_head * heads
 
@@ -468,9 +378,14 @@ class PerceiverAttention(nn.Module):
 
         q = q * self.scale
 
-        # attention
+        # cosine sim attention
 
-        sim = einsum('... i d, ... j d  -> ... i j', q, k)
+        if self.cosine_sim_attn:
+            q, k = map(l2norm, (q, k))
+
+        # similarities and masking
+
+        sim = einsum('... i d, ... j d  -> ... i j', q, k) * self.cosine_sim_scale
 
         if exists(mask):
             max_neg_value = -torch.finfo(sim.dtype).max
@@ -478,7 +393,9 @@ class PerceiverAttention(nn.Module):
             mask = rearrange(mask, 'b j -> b 1 1 j')
             sim = sim.masked_fill(~mask, max_neg_value)
 
-        attn = sim.softmax(dim = -1, dtype = torch.float32)
+        # attention
+
+        attn = sim.softmax(dim = -1)
 
         out = einsum('... i j, ... j d -> ... i d', attn, v)
         out = rearrange(out, 'b h n d -> b n (h d)', h = h)
@@ -496,6 +413,7 @@ class PerceiverResampler(nn.Module):
         num_latents_mean_pooled = 4, # number of latents derived from mean pooled representation of the sequence
         max_seq_len = 512,
         ff_mult = 4,
+        cosine_sim_attn = False
     ):
         super().__init__()
         self.pos_emb = nn.Embedding(max_seq_len, dim)
@@ -514,7 +432,7 @@ class PerceiverResampler(nn.Module):
         self.layers = nn.ModuleList([])
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
-                PerceiverAttention(dim = dim, dim_head = dim_head, heads = heads),
+                PerceiverAttention(dim = dim, dim_head = dim_head, heads = heads, cosine_sim_attn = cosine_sim_attn),
                 FeedForward(dim = dim, mult = ff_mult)
             ]))
 
@@ -546,10 +464,14 @@ class Attention(nn.Module):
         *,
         dim_head = 64,
         heads = 8,
-        context_dim = None
+        context_dim = None,
+        cosine_sim_attn = False
     ):
         super().__init__()
-        self.scale = dim_head ** -0.5
+        self.scale = dim_head ** -0.5 if not cosine_sim_attn else 1.
+        self.cosine_sim_attn = cosine_sim_attn
+        self.cosine_sim_scale = 16 if cosine_sim_attn else 1
+
         self.heads = heads
         inner_dim = dim_head * heads
 
@@ -589,9 +511,14 @@ class Attention(nn.Module):
             k = torch.cat((ck, k), dim = -2)
             v = torch.cat((cv, v), dim = -2)
 
+        # cosine sim attention
+
+        if self.cosine_sim_attn:
+            q, k = map(l2norm, (q, k))
+
         # calculate query / key similarities
 
-        sim = einsum('b h i d, b j d -> b h i j', q, k)
+        sim = einsum('b h i d, b j d -> b h i j', q, k) * self.cosine_sim_scale
 
         # relative positional encoding (T5 style)
 
@@ -609,7 +536,7 @@ class Attention(nn.Module):
 
         # attention
 
-        attn = sim.softmax(dim = -1, dtype = torch.float32)
+        attn = sim.softmax(dim = -1)
 
         # aggregate values
 
@@ -725,7 +652,8 @@ class ResnetBlock(nn.Module):
         groups = 8,
         linear_attn = False,
         use_gca = False,
-        squeeze_excite = False
+        squeeze_excite = False,
+        **attn_kwargs
     ):
         super().__init__()
 
@@ -747,7 +675,8 @@ class ResnetBlock(nn.Module):
                 'b (h w) c',
                 attn_klass(
                     dim = dim_out,
-                    context_dim = cond_dim
+                    context_dim = cond_dim,
+                    **attn_kwargs
                 )
             )
 
@@ -787,10 +716,14 @@ class CrossAttention(nn.Module):
         context_dim = None,
         dim_head = 64,
         heads = 8,
-        norm_context = False
+        norm_context = False,
+        cosine_sim_attn = False
     ):
         super().__init__()
-        self.scale = dim_head ** -0.5
+        self.scale = dim_head ** -0.5 if not cosine_sim_attn else 1.
+        self.cosine_sim_attn = cosine_sim_attn
+        self.cosine_sim_scale = 16 if cosine_sim_attn else 1
+
         self.heads = heads
         inner_dim = dim_head * heads
 
@@ -827,7 +760,17 @@ class CrossAttention(nn.Module):
 
         q = q * self.scale
 
-        sim = einsum('b h i d, b h j d -> b h i j', q, k)
+        # cosine sim attention
+
+        if self.cosine_sim_attn:
+            q, k = map(l2norm, (q, k))
+
+        # similarities
+
+        sim = einsum('b h i d, b h j d -> b h i j', q, k) * self.cosine_sim_scale
+
+        # masking
+
         max_neg_value = -torch.finfo(sim.dtype).max
 
         if exists(mask):
@@ -888,7 +831,8 @@ class LinearAttention(nn.Module):
         dim_head = 32,
         heads = 8,
         dropout = 0.05,
-        context_dim = None
+        context_dim = None,
+        **kwargs
     ):
         super().__init__()
         self.scale = dim_head ** -0.5
@@ -1005,14 +949,15 @@ class TransformerBlock(nn.Module):
         heads = 8,
         dim_head = 32,
         ff_mult = 2,
-        context_dim = None
+        context_dim = None,
+        cosine_sim_attn = False
     ):
         super().__init__()
         self.layers = nn.ModuleList([])
 
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
-                EinopsToAndFrom('b c h w', 'b (h w) c', Attention(dim = dim, heads = heads, dim_head = dim_head, context_dim = context_dim)),
+                EinopsToAndFrom('b c h w', 'b (h w) c', Attention(dim = dim, heads = heads, dim_head = dim_head, context_dim = context_dim, cosine_sim_attn = cosine_sim_attn)),
                 ChanFeedForward(dim = dim, mult = ff_mult)
             ]))
 
@@ -1031,7 +976,8 @@ class LinearAttentionTransformerBlock(nn.Module):
         heads = 8,
         dim_head = 32,
         ff_mult = 2,
-        context_dim = None
+        context_dim = None,
+        **kwargs
     ):
         super().__init__()
         self.layers = nn.ModuleList([])
@@ -1075,6 +1021,40 @@ class CrossEmbedLayer(nn.Module):
         fmaps = tuple(map(lambda conv: conv(x), self.convs))
         return torch.cat(fmaps, dim = 1)
 
+class UpsampleCombiner(nn.Module):
+    def __init__(
+        self,
+        dim,
+        *,
+        enabled = False,
+        dim_ins = tuple(),
+        dim_outs = tuple()
+    ):
+        super().__init__()
+        dim_outs = cast_tuple(dim_outs, len(dim_ins))
+        assert len(dim_ins) == len(dim_outs)
+
+        self.enabled = enabled
+
+        if not self.enabled:
+            self.dim_out = dim
+            return
+
+        self.fmap_convs = nn.ModuleList([Block(dim_in, dim_out) for dim_in, dim_out in zip(dim_ins, dim_outs)])
+        self.dim_out = dim + (sum(dim_outs) if len(dim_outs) > 0 else 0)
+
+    def forward(self, x, fmaps = None):
+        target_size = x.shape[-1]
+
+        fmaps = default(fmaps, tuple())
+
+        if not self.enabled or len(fmaps) == 0 or len(self.fmap_convs) == 0:
+            return x
+
+        fmaps = [resize_image_to(fmap, target_size) for fmap in fmaps]
+        outs = [conv(fmap) for fmap, conv in zip(fmaps, self.fmap_convs)]
+        return torch.cat((x, *outs), dim = 1)
+
 class Unet(nn.Module):
     def __init__(
         self,
@@ -1086,7 +1066,6 @@ class Unet(nn.Module):
         cond_dim = None,
         num_image_tokens = 4,
         num_time_tokens = 2,
-        learned_sinu_pos_emb = True,
         learned_sinu_pos_emb_dim = 16,
         out_dim = None,
         dim_mults=(1, 2, 4, 8),
@@ -1122,6 +1101,8 @@ class Unet(nn.Module):
         scale_skip_connection = True,
         final_resnet_block = True,
         final_conv_kernel_size = 3,
+        cosine_sim_attn = False,
+        combine_upsample_fmaps = False,      # combine feature maps from all upsample blocks, used in unet squared successfully
         pixel_shuffle_upsample = True        # may address checkboard artifacts
     ):
         super().__init__()
@@ -1166,16 +1147,10 @@ class Unet(nn.Module):
         cond_dim = default(cond_dim, dim)
         time_cond_dim = dim * 4 * (2 if lowres_cond else 1)
 
-        # embedding time for discrete gaussian diffusion or log(snr) noise for continuous version
+        # embedding time for log(snr) noise from continuous version
 
-        self.learned_sinu_pos_emb = learned_sinu_pos_emb
-
-        if learned_sinu_pos_emb:
-            sinu_pos_emb = LearnedSinusoidalPosEmb(learned_sinu_pos_emb_dim)
-            sinu_pos_emb_input_dim = learned_sinu_pos_emb_dim + 1
-        else:
-            sinu_pos_emb = SinusoidalPosEmb(dim)
-            sinu_pos_emb_input_dim = dim
+        sinu_pos_emb = LearnedSinusoidalPosEmb(learned_sinu_pos_emb_dim)
+        sinu_pos_emb_input_dim = learned_sinu_pos_emb_dim + 1
 
         self.to_time_hiddens = nn.Sequential(
             sinu_pos_emb,
@@ -1232,7 +1207,7 @@ class Unet(nn.Module):
 
         # attention pooling
 
-        self.attn_pool = PerceiverResampler(dim = cond_dim, depth = 2, dim_head = attn_dim_head, heads = attn_heads, num_latents = attn_pool_num_latents) if attn_pool_text else None
+        self.attn_pool = PerceiverResampler(dim = cond_dim, depth = 2, dim_head = attn_dim_head, heads = attn_heads, num_latents = attn_pool_num_latents, cosine_sim_attn = cosine_sim_attn) if attn_pool_text else None
 
         # for classifier free guidance
 
@@ -1255,7 +1230,7 @@ class Unet(nn.Module):
 
         # attention related params
 
-        attn_kwargs = dict(heads = attn_heads, dim_head = attn_dim_head)
+        attn_kwargs = dict(heads = attn_heads, dim_head = attn_dim_head, cosine_sim_attn = cosine_sim_attn)
 
         num_layers = len(in_out)
 
@@ -1263,6 +1238,8 @@ class Unet(nn.Module):
 
         num_resnet_blocks = cast_tuple(num_resnet_blocks, num_layers)
         resnet_groups = cast_tuple(resnet_groups, num_layers)
+
+        resnet_klass = partial(ResnetBlock, **attn_kwargs)
 
         layer_attns = cast_tuple(layer_attns, num_layers)
         layer_attns_depth = cast_tuple(layer_attns_depth, num_layers)
@@ -1279,7 +1256,7 @@ class Unet(nn.Module):
 
         # initial resnet block (for memory efficient unet)
 
-        self.init_resnet_block = ResnetBlock(init_dim, init_dim, time_cond_dim = time_cond_dim, groups = resnet_groups[0], use_gca = use_global_context_attn) if memory_efficient else None
+        self.init_resnet_block = resnet_klass(init_dim, init_dim, time_cond_dim = time_cond_dim, groups = resnet_groups[0], use_gca = use_global_context_attn) if memory_efficient else None
 
         # scale for resnet skip connections
 
@@ -1326,9 +1303,9 @@ class Unet(nn.Module):
 
             self.downs.append(nn.ModuleList([
                 pre_downsample,
-                ResnetBlock(current_dim, current_dim, cond_dim = layer_cond_dim, linear_attn = layer_use_linear_cross_attn, time_cond_dim = time_cond_dim, groups = groups),
+                resnet_klass(current_dim, current_dim, cond_dim = layer_cond_dim, linear_attn = layer_use_linear_cross_attn, time_cond_dim = time_cond_dim, groups = groups),
                 nn.ModuleList([ResnetBlock(current_dim, current_dim, time_cond_dim = time_cond_dim, groups = groups, use_gca = use_global_context_attn) for _ in range(layer_num_resnet_blocks)]),
-                transformer_block_klass(dim = current_dim, depth = layer_attn_depth, heads = attn_heads, dim_head = attn_dim_head, ff_mult = ff_mult, context_dim = cond_dim),
+                transformer_block_klass(dim = current_dim, depth = layer_attn_depth, ff_mult = ff_mult, context_dim = cond_dim, **attn_kwargs),
                 post_downsample
             ]))
 
@@ -1346,6 +1323,8 @@ class Unet(nn.Module):
 
         # upsampling layers
 
+        upsample_fmap_dims = []
+
         for ind, ((dim_in, dim_out), layer_num_resnet_blocks, groups, layer_attn, layer_attn_depth, layer_cross_attn) in enumerate(zip(reversed(in_out), *reversed_layer_params)):
             is_last = ind == (len(in_out) - 1)
             layer_use_linear_cross_attn = not layer_cross_attn and use_linear_cross_attn
@@ -1354,17 +1333,28 @@ class Unet(nn.Module):
 
             skip_connect_dim = skip_connect_dims.pop()
 
+            upsample_fmap_dims.append(dim_out)
+
             self.ups.append(nn.ModuleList([
-                ResnetBlock(dim_out + skip_connect_dim, dim_out, cond_dim = layer_cond_dim, linear_attn = layer_use_linear_cross_attn, time_cond_dim = time_cond_dim, groups = groups),
+                resnet_klass(dim_out + skip_connect_dim, dim_out, cond_dim = layer_cond_dim, linear_attn = layer_use_linear_cross_attn, time_cond_dim = time_cond_dim, groups = groups),
                 nn.ModuleList([ResnetBlock(dim_out + skip_connect_dim, dim_out, time_cond_dim = time_cond_dim, groups = groups, use_gca = use_global_context_attn) for _ in range(layer_num_resnet_blocks)]),
-                transformer_block_klass(dim = dim_out, depth = layer_attn_depth, heads = attn_heads, dim_head = attn_dim_head, ff_mult = ff_mult, context_dim = cond_dim),
+                transformer_block_klass(dim = dim_out, depth = layer_attn_depth, ff_mult = ff_mult, context_dim = cond_dim, **attn_kwargs),
                 upsample_klass(dim_out, dim_in) if not is_last or memory_efficient else Identity()
             ]))
+
+        # whether to combine feature maps from all upsample blocks before final resnet block out
+
+        self.upsample_combiner = UpsampleCombiner(
+            dim = dim,
+            enabled = combine_upsample_fmaps,
+            dim_ins = upsample_fmap_dims,
+            dim_outs = dim
+        )
 
         # whether to do a final residual from initial conv to the final resnet block out
 
         self.init_conv_to_final_conv_residual = init_conv_to_final_conv_residual
-        final_conv_dim = dim * (2 if init_conv_to_final_conv_residual else 1)
+        final_conv_dim = self.upsample_combiner.dim_out + (dim if init_conv_to_final_conv_residual else 0)
 
         # final optional resnet block and convolution out
 
@@ -1386,14 +1376,12 @@ class Unet(nn.Module):
         text_embed_dim,
         channels,
         channels_out,
-        cond_on_text,
-        learned_sinu_pos_emb
+        cond_on_text
     ):
         if lowres_cond == self.lowres_cond and \
             channels == self.channels and \
             cond_on_text == self.cond_on_text and \
             text_embed_dim == self._locals['text_embed_dim'] and \
-            learned_sinu_pos_emb == self.learned_sinu_pos_emb and \
             channels_out == self.channels_out:
             return self
 
@@ -1402,8 +1390,7 @@ class Unet(nn.Module):
             text_embed_dim = text_embed_dim,
             channels = channels,
             channels_out = channels_out,
-            cond_on_text = cond_on_text,
-            learned_sinu_pos_emb = learned_sinu_pos_emb
+            cond_on_text = cond_on_text
         )
 
         return self.__class__(**{**self._locals, **updated_kwargs})
@@ -1625,6 +1612,8 @@ class Unet(nn.Module):
 
         add_skip_connection = lambda x: torch.cat((x, hiddens.pop() * self.skip_connect_scale), dim = 1)
 
+        up_hiddens = []
+
         for init_block, resnet_blocks, attn_block, upsample in self.ups:
             x = add_skip_connection(x)
             x = init_block(x, t, c)
@@ -1634,7 +1623,12 @@ class Unet(nn.Module):
                 x = resnet_block(x, t)
 
             x = attn_block(x, c)
+            up_hiddens.append(x.contiguous())
             x = upsample(x)
+
+        # whether to combine all feature maps from upsample blocks
+
+        x = self.upsample_combiner(x, up_hiddens)
 
         # final top-most residual if needed
 
@@ -1715,11 +1709,10 @@ class Imagen(nn.Module):
         per_sample_random_aug_noise_level = False,  # unclear when conditioning on augmentation noise level, whether each batch element receives a random aug noise value - turning off due to @marunine's find
         condition_on_text = True,
         auto_normalize_img = True,                  # whether to take care of normalizing the image from [0, 1] to [-1, 1] and back automatically - you can turn this off if you want to pass in the [-1, 1] ranged image yourself from the dataloader
-        continuous_times = True,
         p2_loss_weight_gamma = 0.5,                 # p2 loss weight, from https://arxiv.org/abs/2204.00227 - 0 is equivalent to weight of 1 across time
         p2_loss_weight_k = 1,
         dynamic_thresholding = True,
-        dynamic_thresholding_percentile = 0.95,      # unsure what this was based on perusal of paper
+        dynamic_thresholding_percentile = 0.95,     # unsure what this was based on perusal of paper
         only_train_unet_number = None
     ):
         super().__init__()
@@ -1765,7 +1758,7 @@ class Imagen(nn.Module):
 
         # construct noise schedulers
 
-        noise_scheduler_klass = GaussianDiffusion if not continuous_times else GaussianDiffusionContinuousTimes
+        noise_scheduler_klass = GaussianDiffusionContinuousTimes
         self.noise_schedulers = nn.ModuleList([])
 
         for timestep, noise_schedule in zip(timesteps, noise_schedules):
@@ -1808,8 +1801,7 @@ class Imagen(nn.Module):
                 cond_on_text = self.condition_on_text,
                 text_embed_dim = self.text_embed_dim if self.condition_on_text else None,
                 channels = self.channels,
-                channels_out = self.channels,
-                learned_sinu_pos_emb = continuous_times
+                channels_out = self.channels
             )
 
             self.unets.append(one_unet)
@@ -1917,7 +1909,24 @@ class Imagen(nn.Module):
 
     # gaussian diffusion methods
 
-    def p_mean_variance(self, unet, x, t, *, noise_scheduler, text_embeds = None, text_mask = None, cond_images = None, lowres_cond_img = None, lowres_noise_times = None, cond_scale = 1., model_output = None, t_next = None, pred_objective = 'noise', dynamic_threshold = True):
+    def p_mean_variance(
+        self,
+        unet,
+        x,
+        t,
+        *,
+        noise_scheduler,
+        text_embeds = None,
+        text_mask = None,
+        cond_images = None,
+        lowres_cond_img = None,
+        lowres_noise_times = None,
+        cond_scale = 1.,
+        model_output = None,
+        t_next = None,
+        pred_objective = 'noise',
+        dynamic_threshold = True
+    ):
         assert not (cond_scale != 1. and not self.can_classifier_guidance), 'imagen was not trained with conditional dropout, and thus one cannot use classifier free guidance (cond_scale anything other than 1)'
 
         pred = default(model_output, lambda: unet.forward_with_cond_scale(x, noise_scheduler.get_condition(t), text_embeds = text_embeds, text_mask = text_mask, cond_images = cond_images, cond_scale = cond_scale, lowres_cond_img = lowres_cond_img, lowres_noise_times = self.lowres_noise_schedule.get_condition(lowres_noise_times)))
@@ -1947,7 +1956,23 @@ class Imagen(nn.Module):
         return noise_scheduler.q_posterior(x_start = x_start, x_t = x, t = t, t_next = t_next)
 
     @torch.no_grad()
-    def p_sample(self, unet, x, t, *, noise_scheduler, t_next = None, text_embeds = None, text_mask = None, cond_images = None, cond_scale = 1., lowres_cond_img = None, lowres_noise_times = None, pred_objective = 'noise', dynamic_threshold = True):
+    def p_sample(
+        self,
+        unet,
+        x,
+        t,
+        *,
+        noise_scheduler,
+        t_next = None,
+        text_embeds = None,
+        text_mask = None,
+        cond_images = None,
+        cond_scale = 1.,
+        lowres_cond_img = None,
+        lowres_noise_times = None,
+        pred_objective = 'noise',
+        dynamic_threshold = True
+    ):
         b, *_, device = *x.shape, x.device
         model_mean, _, model_log_variance = self.p_mean_variance(unet, x = x, t = t, t_next = t_next, noise_scheduler = noise_scheduler, text_embeds = text_embeds, text_mask = text_mask, cond_images = cond_images, cond_scale = cond_scale, lowres_cond_img = lowres_cond_img, lowres_noise_times = lowres_noise_times, pred_objective = pred_objective, dynamic_threshold = dynamic_threshold)
         noise = torch.randn_like(x)
@@ -1957,33 +1982,87 @@ class Imagen(nn.Module):
         return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
 
     @torch.no_grad()
-    def p_sample_loop(self, unet, shape, *, noise_scheduler, lowres_cond_img = None, lowres_noise_times = None, text_embeds = None, text_mask = None, cond_images = None, cond_scale = 1, pred_objective = 'noise', dynamic_threshold = True, use_tqdm = True):
+    def p_sample_loop(
+        self,
+        unet,
+        shape,
+        *,
+        noise_scheduler,
+        lowres_cond_img = None,
+        lowres_noise_times = None,
+        text_embeds = None,
+        text_mask = None,
+        cond_images = None,
+        inpaint_images = None,
+        inpaint_masks = None,
+        inpaint_resample_times = 5,
+        cond_scale = 1,
+        pred_objective = 'noise',
+        dynamic_threshold = True,
+        use_tqdm = True
+    ):
         device = self.device
 
         batch = shape[0]
         img = torch.randn(shape, device = device)
         lowres_cond_img = maybe(self.normalize_img)(lowres_cond_img)
 
+        # prepare inpainting
+
+        has_inpainting = exists(inpaint_images) and exists(inpaint_masks)
+        resample_times = inpaint_resample_times if has_inpainting else 1
+
+        if has_inpainting:
+            inpaint_images = self.normalize_img(inpaint_images)
+            inpaint_images = resize_image_to(inpaint_images, shape[-1])
+            inpaint_masks = resize_image_to(rearrange(inpaint_masks, 'b ... -> b 1 ...').float(), shape[-1]).bool()
+
+        # time
+
         timesteps = noise_scheduler.get_sampling_timesteps(batch, device = device)
 
         for times, times_next in tqdm(timesteps, desc = 'sampling loop time step', total = len(timesteps), disable = not use_tqdm):
-            img = self.p_sample(
-                unet,
-                img,
-                times,
-                t_next = times_next,
-                text_embeds = text_embeds,
-                text_mask = text_mask,
-                cond_images = cond_images,
-                cond_scale = cond_scale,
-                lowres_cond_img = lowres_cond_img,
-                lowres_noise_times = lowres_noise_times,
-                noise_scheduler = noise_scheduler,
-                pred_objective = pred_objective,
-                dynamic_threshold = dynamic_threshold
-            )
+            is_last_timestep = times_next == 0
+
+            for r in reversed(range(resample_times)):
+                is_last_resample_step = r == 0
+
+                if has_inpainting:
+                    noised_inpaint_images, _ = noise_scheduler.q_sample(inpaint_images, t = times)
+                    img = img * ~inpaint_masks + noised_inpaint_images * inpaint_masks
+
+                img = self.p_sample(
+                    unet,
+                    img,
+                    times,
+                    t_next = times_next,
+                    text_embeds = text_embeds,
+                    text_mask = text_mask,
+                    cond_images = cond_images,
+                    cond_scale = cond_scale,
+                    lowres_cond_img = lowres_cond_img,
+                    lowres_noise_times = lowres_noise_times,
+                    noise_scheduler = noise_scheduler,
+                    pred_objective = pred_objective,
+                    dynamic_threshold = dynamic_threshold
+                )
+
+                if has_inpainting and not (is_last_resample_step or torch.all(is_last_timestep)):
+                    renoised_img = noise_scheduler.q_sample_from_to(img, times_next, times)
+
+                    img = torch.where(
+                        rearrange(is_last_timestep, 'b -> b 1 1 1'),
+                        img,
+                        renoised_img
+                    )
 
         img.clamp_(-1., 1.)
+
+        # final inpainting
+
+        if has_inpainting:
+            img = img * ~inpaint_masks + inpaint_images * inpaint_masks
+
         unnormalize_img = self.unnormalize_img(img)
         return unnormalize_img
 
@@ -1995,6 +2074,9 @@ class Imagen(nn.Module):
         text_masks = None,
         text_embeds = None,
         cond_images = None,
+        inpaint_images = None,
+        inpaint_masks = None,
+        inpaint_resample_times = 5,
         batch_size = 1,
         cond_scale = 1.,
         lowres_sample_noise_level = None,
@@ -2010,7 +2092,9 @@ class Imagen(nn.Module):
         cond_images = maybe(cast_uint8_images_to_float)(cond_images)
 
         if exists(texts) and not exists(text_embeds) and not self.unconditional:
-            text_embeds, text_masks = self.encode_text(texts, return_attn_mask = True)
+            with autocast(enabled = False):
+                text_embeds, text_masks = self.encode_text(texts, return_attn_mask = True)
+
             text_embeds, text_masks = map(lambda t: t.to(device), (text_embeds, text_masks))
 
         if not self.unconditional:
@@ -2022,6 +2106,8 @@ class Imagen(nn.Module):
         assert not (self.condition_on_text and not exists(text_embeds)), 'text or text encodings must be passed into imagen if specified'
         assert not (not self.condition_on_text and exists(text_embeds)), 'imagen specified not to be conditioned on text, yet it is presented'
         assert not (exists(text_embeds) and text_embeds.shape[-1] != self.text_embed_dim), f'invalid text embedding dimension being passed in (should be {self.text_embed_dim})'
+
+        assert not (exists(inpaint_images) ^ exists(inpaint_masks)),  'inpaint images and masks must be both passed in to do inpainting'
 
         outputs = []
 
@@ -2055,6 +2141,9 @@ class Imagen(nn.Module):
                     text_embeds = text_embeds,
                     text_mask = text_masks,
                     cond_images = cond_images,
+                    inpaint_images = inpaint_images,
+                    inpaint_masks = inpaint_masks,
+                    inpaint_resample_times = inpaint_resample_times,
                     cond_scale = unet_cond_scale,
                     lowres_cond_img = lowres_cond_img,
                     lowres_noise_times = lowres_noise_times,
@@ -2081,7 +2170,24 @@ class Imagen(nn.Module):
 
         return pil_images[output_index] # now you have a bunch of pillow images you can just .save(/where/ever/you/want.png)
 
-    def p_losses(self, unet, x_start, times, *, noise_scheduler, lowres_cond_img = None, lowres_aug_times = None, text_embeds = None, text_mask = None, cond_images = None, noise = None, times_next = None, pred_objective = 'noise', p2_loss_weight_gamma = 0., random_crop_size = None):
+    def p_losses(
+        self,
+        unet,
+        x_start,
+        times,
+        *,
+        noise_scheduler,
+        lowres_cond_img = None,
+        lowres_aug_times = None,
+        text_embeds = None,
+        text_mask = None,
+        cond_images = None,
+        noise = None,
+        times_next = None,
+        pred_objective = 'noise',
+        p2_loss_weight_gamma = 0.,
+        random_crop_size = None
+    ):
         noise = default(noise, lambda: torch.randn_like(x_start))
 
         # normalize to [-1, 1]
@@ -2186,7 +2292,9 @@ class Imagen(nn.Module):
         if exists(texts) and not exists(text_embeds) and not self.unconditional:
             assert len(texts) == len(images), 'number of text captions does not match up with the number of images given'
 
-            text_embeds, text_masks = self.encode_text(texts, return_attn_mask = True)
+            with autocast(enabled = False):
+                text_embeds, text_masks = self.encode_text(texts, return_attn_mask = True)
+
             text_embeds, text_masks = map(lambda t: t.to(images.device), (text_embeds, text_masks))
 
         if not self.unconditional:

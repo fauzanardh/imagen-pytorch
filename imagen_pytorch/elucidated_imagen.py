@@ -8,6 +8,7 @@ from tqdm import tqdm
 import torch
 import torch.nn.functional as F
 from torch import nn, einsum
+from torch.cuda.amp import autocast
 import torchvision.transforms as T
 
 import kornia.augmentation as K
@@ -15,7 +16,6 @@ import kornia.augmentation as K
 from einops import rearrange, repeat, reduce
 
 from imagen_pytorch.imagen_pytorch import (
-    GaussianDiffusion,
     GaussianDiffusionContinuousTimes,
     Unet,
     first,
@@ -78,7 +78,7 @@ class ElucidatedImagen(nn.Module):
         condition_on_text = True,
         auto_normalize_img = True,                  # whether to take care of normalizing the image from [0, 1] to [-1, 1] and back automatically - you can turn this off if you want to pass in the [-1, 1] ranged image yourself from the dataloader
         dynamic_thresholding = True,
-        dynamic_thresholding_percentile = 0.9,      # unsure what this was based on perusal of paper
+        dynamic_thresholding_percentile = 0.95,     # unsure what this was based on perusal of paper
         only_train_unet_number = None,
         lowres_noise_schedule = 'linear',
         num_sample_steps = 32,                      # number of sampling steps
@@ -140,8 +140,7 @@ class ElucidatedImagen(nn.Module):
                 cond_on_text = self.condition_on_text,
                 text_embed_dim = self.text_embed_dim if self.condition_on_text else None,
                 channels = self.channels,
-                channels_out = self.channels,
-                learned_sinu_pos_emb = True
+                channels_out = self.channels
             )
 
             self.unets.append(one_unet)
@@ -353,6 +352,9 @@ class ElucidatedImagen(nn.Module):
         dynamic_threshold = True,
         cond_scale = 1.,
         use_tqdm = True,
+        inpaint_images = None,
+        inpaint_masks = None,
+        inpaint_resample_times = 5,
         **kwargs
     ):
         # get specific sampling hyperparameters for unet
@@ -377,6 +379,16 @@ class ElucidatedImagen(nn.Module):
 
         images = init_sigma * torch.randn(shape, device = self.device)
 
+        # prepare inpainting images and mask
+
+        has_inpainting = exists(inpaint_images) and exists(inpaint_masks)
+        resample_times = inpaint_resample_times if has_inpainting else 1
+
+        if has_inpainting:
+            inpaint_images = self.normalize_img(inpaint_images)
+            inpaint_images = resize_image_to(inpaint_images, shape[-1])
+            inpaint_masks = resize_image_to(rearrange(inpaint_masks, 'b ... -> b 1 ...').float(), shape[-1]).bool()
+
         # unet kwargs
 
         unet_kwargs = dict(
@@ -389,41 +401,62 @@ class ElucidatedImagen(nn.Module):
 
         # gradually denoise
 
-        for sigma, sigma_next, gamma in tqdm(sigmas_and_gammas, desc = 'sampling time step', disable = not use_tqdm):
+        total_steps = len(sigmas_and_gammas)
+
+        for ind, (sigma, sigma_next, gamma) in tqdm(enumerate(sigmas_and_gammas), total = total_steps, desc = 'sampling time step', disable = not use_tqdm):
+            is_last_timestep = ind == (total_steps - 1)
+
             sigma, sigma_next, gamma = map(lambda t: t.item(), (sigma, sigma_next, gamma))
 
-            eps = hp.S_noise * torch.randn(shape, device = self.device) # stochastic sampling
+            for r in reversed(range(resample_times)):
+                is_last_resample_step = r == 0
 
-            sigma_hat = sigma + gamma * sigma
-            images_hat = images + sqrt(sigma_hat ** 2 - sigma ** 2) * eps
+                eps = hp.S_noise * torch.randn(shape, device = self.device) # stochastic sampling
 
-            model_output = self.preconditioned_network_forward(
-                unet.forward_with_cond_scale,
-                images_hat,
-                sigma_hat,
-                **unet_kwargs
-            )
+                sigma_hat = sigma + gamma * sigma
+                added_noise = sqrt(sigma_hat ** 2 - sigma ** 2) * eps
 
-            denoised_over_sigma = (images_hat - model_output) / sigma_hat
+                images_hat = images + added_noise
 
-            images_next = images_hat + (sigma_next - sigma_hat) * denoised_over_sigma
+                if has_inpainting:
+                    images_hat = images_hat * ~inpaint_masks + (inpaint_images + added_noise) * inpaint_masks
 
-            # second order correction, if not the last timestep
-
-            if sigma_next != 0:
-                model_output_next = self.preconditioned_network_forward(
+                model_output = self.preconditioned_network_forward(
                     unet.forward_with_cond_scale,
-                    images_next,
-                    sigma_next,
+                    images_hat,
+                    sigma_hat,
                     **unet_kwargs
                 )
 
-                denoised_prime_over_sigma = (images_next - model_output_next) / sigma_next
-                images_next = images_hat + 0.5 * (sigma_next - sigma_hat) * (denoised_over_sigma + denoised_prime_over_sigma)
+                denoised_over_sigma = (images_hat - model_output) / sigma_hat
 
-            images = images_next
+                images_next = images_hat + (sigma_next - sigma_hat) * denoised_over_sigma
+
+                # second order correction, if not the last timestep
+
+                if sigma_next != 0:
+                    model_output_next = self.preconditioned_network_forward(
+                        unet.forward_with_cond_scale,
+                        images_next,
+                        sigma_next,
+                        **unet_kwargs
+                    )
+
+                    denoised_prime_over_sigma = (images_next - model_output_next) / sigma_next
+                    images_next = images_hat + 0.5 * (sigma_next - sigma_hat) * (denoised_over_sigma + denoised_prime_over_sigma)
+
+                images = images_next
+
+                if has_inpainting and not (is_last_resample_step or is_last_timestep):
+                    # renoise in repaint and then resample
+                    repaint_noise = torch.randn(shape, device = self.device)
+                    images = images + (sigma - sigma_next) * repaint_noise
 
         images = images.clamp(-1., 1.)
+
+        if has_inpainting:
+            images = images * ~inpaint_masks + inpaint_images * inpaint_masks
+
         return self.unnormalize_img(images)
 
     @torch.no_grad()
@@ -434,6 +467,9 @@ class ElucidatedImagen(nn.Module):
         text_masks = None,
         text_embeds = None,
         cond_images = None,
+        inpaint_images = None,
+        inpaint_masks = None,
+        inpaint_resample_times = 5,
         batch_size = 1,
         cond_scale = 1.,
         lowres_sample_noise_level = None,
@@ -449,7 +485,9 @@ class ElucidatedImagen(nn.Module):
         cond_images = maybe(cast_uint8_images_to_float)(cond_images)
 
         if exists(texts) and not exists(text_embeds) and not self.unconditional:
-            text_embeds, text_masks = self.encode_text(texts, return_attn_mask = True)
+            with autocast(enabled = False):
+                text_embeds, text_masks = self.encode_text(texts, return_attn_mask = True)
+
             text_embeds, text_masks = map(lambda t: t.to(device), (text_embeds, text_masks))
 
         if not self.unconditional:
@@ -461,6 +499,8 @@ class ElucidatedImagen(nn.Module):
         assert not (self.condition_on_text and not exists(text_embeds)), 'text or text encodings must be passed into imagen if specified'
         assert not (not self.condition_on_text and exists(text_embeds)), 'imagen specified not to be conditioned on text, yet it is presented'
         assert not (exists(text_embeds) and text_embeds.shape[-1] != self.text_embed_dim), f'invalid text embedding dimension being passed in (should be {self.text_embed_dim})'
+
+        assert not (exists(inpaint_images) ^ exists(inpaint_masks)),  'inpaint images and masks must be both passed in to do inpainting'
 
         outputs = []
 
@@ -497,6 +537,9 @@ class ElucidatedImagen(nn.Module):
                     text_embeds = text_embeds,
                     text_mask = text_masks,
                     cond_images = cond_images,
+                    inpaint_images = inpaint_images,
+                    inpaint_masks = inpaint_masks,
+                    inpaint_resample_times = inpaint_resample_times,
                     cond_scale = unet_cond_scale,
                     lowres_cond_img = lowres_cond_img,
                     lowres_noise_times = lowres_noise_times,
@@ -564,7 +607,9 @@ class ElucidatedImagen(nn.Module):
         if exists(texts) and not exists(text_embeds) and not self.unconditional:
             assert len(texts) == len(images), 'number of text captions does not match up with the number of images given'
 
-            text_embeds, text_masks = self.encode_text(texts, return_attn_mask = True)
+            with autocast(enabled = False):
+                text_embeds, text_masks = self.encode_text(texts, return_attn_mask = True)
+
             text_embeds, text_masks = map(lambda t: t.to(images.device), (text_embeds, text_masks))
 
         if not self.unconditional:
