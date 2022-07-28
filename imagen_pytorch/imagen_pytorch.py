@@ -23,6 +23,7 @@ from einops_exts import rearrange_many, repeat_many, check_shape
 from einops_exts.torch import EinopsToAndFrom
 
 from imagen_pytorch.t5 import t5_encode_text, get_encoded_dim, DEFAULT_T5_NAME
+from imagen_pytorch.sharpened_cosine_similarity import SharpCosSim2d as SharpCosSim2D
 
 # helper functions
 
@@ -552,7 +553,7 @@ def Upsample(dim, dim_out = None):
 
     return nn.Sequential(
         nn.Upsample(scale_factor = 2, mode = 'nearest'),
-        nn.Conv2d(dim, dim_out, 3, padding = 1)
+        SharpCosSim2D(dim, dim_out, 3, padding = 1)
     )
 
 class PixelShuffleUpsample(nn.Module):
@@ -563,7 +564,7 @@ class PixelShuffleUpsample(nn.Module):
     def __init__(self, dim, dim_out = None):
         super().__init__()
         dim_out = default(dim_out, dim)
-        conv = nn.Conv2d(dim, dim_out * 4, 1)
+        conv = SharpCosSim2D(dim, dim_out * 4, 1)
 
         self.net = nn.Sequential(
             conv,
@@ -587,7 +588,7 @@ class PixelShuffleUpsample(nn.Module):
 
 def Downsample(dim, dim_out = None):
     dim_out = default(dim_out, dim)
-    return nn.Conv2d(dim, dim_out, 4, 2, 1)
+    return SharpCosSim2D(dim, dim_out, 4, 2, 1)
 
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim):
@@ -629,7 +630,7 @@ class Block(nn.Module):
         super().__init__()
         self.groupnorm = nn.GroupNorm(groups, dim) if norm else Identity()
         self.activation = nn.SiLU()
-        self.project = nn.Conv2d(dim, dim_out, 3, padding = 1)
+        self.project = SharpCosSim2D(dim, dim_out, 3, padding = 1)
 
     def forward(self, x, scale_shift = None):
         x = self.groupnorm(x)
@@ -685,7 +686,7 @@ class ResnetBlock(nn.Module):
 
         self.gca = GlobalContext(dim_in = dim_out, dim_out = dim_out) if use_gca else Always(1)
 
-        self.res_conv = nn.Conv2d(dim, dim_out, 1) if dim != dim_out else Identity()
+        self.res_conv = SharpCosSim2D(dim, dim_out, 1) if dim != dim_out else Identity()
 
 
     def forward(self, x, time_emb = None, cond = None):
@@ -844,26 +845,26 @@ class LinearAttention(nn.Module):
 
         self.to_q = nn.Sequential(
             nn.Dropout(dropout),
-            nn.Conv2d(dim, inner_dim, 1, bias = False),
-            nn.Conv2d(inner_dim, inner_dim, 3, bias = False, padding = 1, groups = inner_dim)
+            SharpCosSim2D(dim, inner_dim, 1),
+            SharpCosSim2D(inner_dim, inner_dim, 3, padding = 1, groups = inner_dim)
         )
 
         self.to_k = nn.Sequential(
             nn.Dropout(dropout),
-            nn.Conv2d(dim, inner_dim, 1, bias = False),
-            nn.Conv2d(inner_dim, inner_dim, 3, bias = False, padding = 1, groups = inner_dim)
+            SharpCosSim2D(dim, inner_dim, 1),
+            SharpCosSim2D(inner_dim, inner_dim, 3, padding = 1, groups = inner_dim)
         )
 
         self.to_v = nn.Sequential(
             nn.Dropout(dropout),
-            nn.Conv2d(dim, inner_dim, 1, bias = False),
-            nn.Conv2d(inner_dim, inner_dim, 3, bias = False, padding = 1, groups = inner_dim)
+            SharpCosSim2D(dim, inner_dim, 1),
+            SharpCosSim2D(inner_dim, inner_dim, 3, padding = 1, groups = inner_dim)
         )
 
         self.to_context = nn.Sequential(nn.LayerNorm(context_dim), nn.Linear(context_dim, inner_dim * 2, bias = False)) if exists(context_dim) else None
 
         self.to_out = nn.Sequential(
-            nn.Conv2d(inner_dim, dim, 1, bias = False),
+            SharpCosSim2D(inner_dim, dim, 1),
             ChanLayerNorm(dim)
         )
 
@@ -903,13 +904,13 @@ class GlobalContext(nn.Module):
         dim_out
     ):
         super().__init__()
-        self.to_k = nn.Conv2d(dim_in, 1, 1)
+        self.to_k = SharpCosSim2D(dim_in, 1, 1)
         hidden_dim = max(3, dim_out // 2)
 
         self.net = nn.Sequential(
-            nn.Conv2d(dim_in, hidden_dim, 1),
+            SharpCosSim2D(dim_in, hidden_dim, 1),
             nn.SiLU(),
-            nn.Conv2d(hidden_dim, dim_out, 1),
+            SharpCosSim2D(hidden_dim, dim_out, 1),
             nn.Sigmoid()
         )
 
@@ -934,10 +935,10 @@ def ChanFeedForward(dim, mult = 2):  # in paper, it seems for self attention lay
     hidden_dim = int(dim * mult)
     return nn.Sequential(
         ChanLayerNorm(dim),
-        nn.Conv2d(dim, hidden_dim, 1, bias = False),
+        SharpCosSim2D(dim, hidden_dim, 1),
         nn.GELU(),
         ChanLayerNorm(hidden_dim),
-        nn.Conv2d(hidden_dim, dim, 1, bias = False)
+        SharpCosSim2D(hidden_dim, dim, 1)
     )
 
 class TransformerBlock(nn.Module):
@@ -1015,7 +1016,7 @@ class CrossEmbedLayer(nn.Module):
 
         self.convs = nn.ModuleList([])
         for kernel, dim_scale in zip(kernel_sizes, dim_scales):
-            self.convs.append(nn.Conv2d(dim_in, dim_scale, kernel, stride = stride, padding = (kernel - stride) // 2))
+            self.convs.append(SharpCosSim2D(dim_in, dim_scale, kernel, stride = stride, padding = (kernel - stride) // 2))
 
     def forward(self, x):
         fmaps = tuple(map(lambda conv: conv(x), self.convs))
@@ -1147,7 +1148,7 @@ class Unet(nn.Module):
 
         # initial convolution
 
-        self.init_conv = CrossEmbedLayer(init_channels, dim_out = init_dim, kernel_sizes = init_cross_embed_kernel_sizes, stride = 1) if init_cross_embed else nn.Conv2d(init_channels, init_dim, init_conv_kernel_size, padding = init_conv_kernel_size // 2)
+        self.init_conv = CrossEmbedLayer(init_channels, dim_out = init_dim, kernel_sizes = init_cross_embed_kernel_sizes, stride = 1) if init_cross_embed else SharpCosSim2D(init_channels, init_dim, init_conv_kernel_size, padding = init_conv_kernel_size // 2)
 
         dims = [init_dim, *map(lambda m: dim * m, dim_mults)]
         in_out = list(zip(dims[:-1], dims[1:]))
@@ -1309,7 +1310,7 @@ class Unet(nn.Module):
 
             post_downsample = None
             if not memory_efficient:
-                post_downsample = downsample_klass(current_dim, dim_out) if not is_last else Parallel(nn.Conv2d(dim_in, dim_out, 3, padding = 1), nn.Conv2d(dim_in, dim_out, 1))
+                post_downsample = downsample_klass(current_dim, dim_out) if not is_last else Parallel(SharpCosSim2D(dim_in, dim_out, 3, padding = 1), SharpCosSim2D(dim_in, dim_out, 1))
 
             self.downs.append(nn.ModuleList([
                 pre_downsample,
@@ -1373,7 +1374,7 @@ class Unet(nn.Module):
         final_conv_dim_in = dim if final_resnet_block else final_conv_dim
         final_conv_dim_in += (channels if lowres_cond else 0)
 
-        self.final_conv = nn.Conv2d(final_conv_dim_in, self.channels_out, final_conv_kernel_size, padding = final_conv_kernel_size // 2)
+        self.final_conv = SharpCosSim2D(final_conv_dim_in, self.channels_out, final_conv_kernel_size, padding = final_conv_kernel_size // 2)
 
         zero_init_(self.final_conv)
 
