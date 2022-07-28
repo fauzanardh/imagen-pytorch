@@ -139,13 +139,14 @@ class SharpCosSim2d(nn.Conv2d):
         # Find the l2-norm of the inputs at each position of the kernels.
         # Sum the squared inputs over each set of kernel positions
         # by convolving them with the mock all-ones kernel weights.
+        weights = torch.ones((
+            self.groups,
+            self.channels_per_kernel,
+            self.kernel_size,
+            self.kernel_size)).to(inp.device)
         xnorm = F.conv2d(
             inp.square(),
-            torch.ones((
-                self.groups,
-                self.channels_per_kernel,
-                self.kernel_size,
-                self.kernel_size)),
+            weights,
             stride=self.stride,
             padding=self.padding,
             groups=self.groups)
