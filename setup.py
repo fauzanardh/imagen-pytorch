@@ -34,6 +34,7 @@ setup(
     'fsspec',
     'kornia',
     'resize-right',
+    'bitsandbytes-cuda112',
     'numpy',
     'packaging',
     'pillow',
