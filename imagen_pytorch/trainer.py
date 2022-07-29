@@ -312,24 +312,24 @@ class ImagenTrainer(nn.Module):
             if optimizer_class == "adam":
                 optimizer = Adam(
                     unet.parameters(),
-                    lr=lr,
-                    eps=eps,
+                    lr=unet_lr,
+                    eps=unet_eps,
                     betas=(beta1, beta2),
                     **kwargs,
                 )
             elif optimizer_class == "adamw":
                 optimizer = AdamW(
                     unet.parameters(),
-                    lr=lr,
-                    eps=eps,
+                    lr=unet_lr,
+                    eps=unet_eps,
                     betas=(beta1, beta2),
                     **kwargs,
                 )
             elif optimizer_class == "adam8bit":
                 optimizer = Adam8bit(
                     unet.parameters(),
-                    lr=lr,
-                    eps=eps,
+                    lr=unet_lr,
+                    eps=unet_eps,
                     betas=(beta1, beta2),
                     **kwargs,
                 )
@@ -341,8 +341,8 @@ class ImagenTrainer(nn.Module):
             elif optimizer_class == "adamw8bit":
                 optimizer = AdamW8bit(
                     unet.parameters(),
-                    lr=lr,
-                    eps=eps,
+                    lr=unet_lr,
+                    eps=unet_eps,
                     betas=(beta1, beta2),
                     **kwargs,
                 )
@@ -354,8 +354,8 @@ class ImagenTrainer(nn.Module):
             elif optimizer_class == "adafactor":
                 optimizer = Adafactor(
                     unet.parameters(),
-                    lr=lr,
-                    eps=eps,
+                    lr=unet_lr,
+                    eps=unet_eps,
                     beta1=beta1,
                     **kwargs,
                 )
