@@ -1371,7 +1371,7 @@ class Unet(nn.Module):
         final_conv_dim_in = dim if final_resnet_block else final_conv_dim
         final_conv_dim_in += (channels if lowres_cond else 0)
 
-        self.final_norm = nn.Sequential([nn.GroupNorm(32, final_conv_dim_in), nn.SiLU()]) if group_norm_final_conv else Identity()
+        self.final_norm = nn.Sequential(nn.GroupNorm(32, final_conv_dim_in), nn.SiLU()) if group_norm_final_conv else Identity()
         self.final_conv = nn.Conv2d(final_conv_dim_in, self.channels_out, final_conv_kernel_size, padding = final_conv_kernel_size // 2)
 
         zero_init_(self.final_conv)
