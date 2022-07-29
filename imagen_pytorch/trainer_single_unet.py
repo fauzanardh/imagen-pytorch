@@ -19,7 +19,6 @@ import torchvision.transforms as T
 from accelerate import Accelerator, DistributedType, DistributedDataParallelKwargs
 
 from imagen_pytorch.imagen_pytorch import (
-    GaussianDiffusion,
     GaussianDiffusionContinuousTimes,
     Unet,
     cast_tuple,
@@ -69,7 +68,6 @@ class SingleUnet(nn.Module):
         per_sample_random_aug_noise_level=False,
         condition_on_text=True,
         auto_normalize_img=True,
-        continuous_times=True,
         p2_loss_weight_gamma=0.5,
         p2_loss_weight_k=1,
         dynamic_thresholding=True,
@@ -99,11 +97,7 @@ class SingleUnet(nn.Module):
         self.channels = channels
 
         # construct noise scheduler
-        noise_scheduler_class = (
-            GaussianDiffusion
-            if not continuous_times
-            else GaussianDiffusionContinuousTimes
-        )
+        noise_scheduler_class = GaussianDiffusionContinuousTimes
         # default to cosine noise schedule for first and second unet, and linear for the rest
         noise_schedule = default(noise_schedule, "cosine") if unet_num < 3 else "linear"
         self.noise_scheduler = noise_scheduler_class(
@@ -132,7 +126,7 @@ class SingleUnet(nn.Module):
             text_embed_dim=self.text_embed_dim if self.condition_on_text else None,
             channels=self.channels,
             channels_out=self.channels,
-            learned_sinu_pos_emb=continuous_times,
+            learned_sinu_pos_emb=16,
         ).to(unet_device)
         self.image_size = image_size
         self.sample_channels = self.channels
