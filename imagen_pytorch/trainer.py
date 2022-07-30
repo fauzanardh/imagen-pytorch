@@ -926,7 +926,7 @@ class ImagenTrainer(nn.Module):
     def sample(self, *args, **kwargs):
         context = nullcontext if  kwargs.pop('use_non_ema', False) else self.use_ema_unets
 
-        self.print_untrained_unets()        
+        # self.print_untrained_unets()
 
         with context():
             output = self.imagen.sample(*args, device = self.device, use_tqdm = self.is_main, **kwargs)
