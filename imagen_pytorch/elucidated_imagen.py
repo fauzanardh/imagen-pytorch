@@ -439,8 +439,8 @@ class ElucidatedImagen(nn.Module):
                 if has_inpainting:
                     images_hat = images_hat * ~inpaint_masks + (inpaint_images + added_noise) * inpaint_masks
 
-                model_output = self.preconditioned_network_forward(
-                    unet.forward_with_cond_scale,
+                model_output = self.preconditioned_network_with_cond_scale(
+                    unet.forward,
                     images_hat,
                     sigma_hat,
                     **unet_kwargs
@@ -453,8 +453,8 @@ class ElucidatedImagen(nn.Module):
                 # second order correction, if not the last timestep
 
                 if sigma_next != 0:
-                    model_output_next = self.preconditioned_network_forward(
-                        unet.forward_with_cond_scale,
+                    model_output_next = self.preconditioned_network_with_cond_scale(
+                        unet.forward,
                         images_next,
                         sigma_next,
                         **unet_kwargs
