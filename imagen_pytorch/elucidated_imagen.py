@@ -411,10 +411,14 @@ class ElucidatedImagen(nn.Module):
             for r in reversed(range(resample_times)):
                 is_last_resample_step = r == 0
 
-                eps = hp.S_noise * torch.randn(shape, device = self.device) # stochastic sampling
-
+                # stochastic sampling
                 sigma_hat = sigma + gamma * sigma
-                added_noise = sqrt(sigma_hat ** 2 - sigma ** 2) * eps
+                if gamma > 0:
+                    eps = hp.S_noise * torch.randn(shape, device = self.device)
+                    added_noise = sqrt(sigma_hat ** 2 - sigma ** 2) * eps
+                    images_hat = images + added_noise
+                else:
+                    images_hat = images
 
                 images_hat = images + added_noise
 
