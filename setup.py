@@ -29,7 +29,7 @@ setup(
     'accelerate',
     'click',
     'resize-right',
-    'bitsandbytes',
+    # 'bitsandbytes',
     'einops>=0.4',
     'einops-exts',
     'ema-pytorch>=0.0.3',
