@@ -1554,7 +1554,8 @@ class Unet(nn.Module):
 
             # conditional dropout
 
-            text_keep_mask = prob_mask_like((batch_size,), 1 - cond_drop_prob, device = device)
+            text_keep_prob = 0 if torch.rand(1).item() < cond_drop_prob else 1
+            text_keep_mask = prob_mask_like((batch_size,), text_keep_prob, device = device)
 
             text_keep_mask_embed = rearrange(text_keep_mask, 'b -> b 1 1')
             text_keep_mask_hidden = rearrange(text_keep_mask, 'b -> b 1')
