@@ -434,8 +434,6 @@ class ElucidatedImagen(nn.Module):
                 else:
                     images_hat = images
 
-                images_hat = images + added_noise
-
                 if has_inpainting:
                     images_hat = images_hat * ~inpaint_masks + (inpaint_images + added_noise) * inpaint_masks
 
