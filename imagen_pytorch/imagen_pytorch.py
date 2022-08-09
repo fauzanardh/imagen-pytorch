@@ -1084,6 +1084,7 @@ class Unet(nn.Module):
         use_linear_attn = False,
         use_linear_cross_attn = False,
         cond_on_text = True,
+        allow_identity_for_cond_on_text = False,
         max_text_len = 256,
         init_dim = None,
         resnet_groups = 8,
@@ -1208,7 +1209,11 @@ class Unet(nn.Module):
 
         if cond_on_text:
             assert exists(text_embed_dim), 'text_embed_dim must be given to the unet if cond_on_text is True'
-            self.text_to_cond = nn.Linear(text_embed_dim, cond_dim)
+            
+            if allow_identity_for_cond_on_text and text_embed_dim == dim:
+                self.text_to_cond = nn.Identity()
+            else:
+                self.text_to_cond = nn.Linear(text_embed_dim, cond_dim)
 
         # finer control over whether to condition on text encodings
 
