@@ -320,6 +320,20 @@ class ElucidatedImagen(nn.Module):
 
         return self.threshold_x_start(out, dynamic_threshold)
 
+    def preconditioned_network_with_cond_scale(
+        self,
+        *args,
+        cond_scale = 1.0,
+        **kwargs,
+    ):
+        logits = self.preconditioned_network_forward(*args, **kwargs)
+
+        if cond_scale == 1.0:
+            return logits
+
+        null_logits = self.preconditioned_network_forward(*args, cond_drop_prob=1.0, **kwargs)
+        return null_logits + (logits - null_logits) * cond_scale
+
     # sampling
 
     # sample schedule
