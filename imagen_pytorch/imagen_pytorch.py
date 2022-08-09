@@ -1285,6 +1285,9 @@ class Unet(nn.Module):
         layer_params = [num_resnet_blocks, resnet_groups, layer_attns, layer_attns_depth, layer_cross_attns]
         reversed_layer_params = list(map(reversed, layer_params))
 
+        # inner conditioning
+        self.inner_conditioning = inner_conditioning
+
         # downsampling layers
 
         skip_connect_dims = [] # keep track of skip connection dimensions
@@ -1295,7 +1298,7 @@ class Unet(nn.Module):
             layer_use_linear_cross_attn = not layer_cross_attn and use_linear_cross_attn
             layer_cond_dim = cond_dim if layer_cross_attn or layer_use_linear_cross_attn else None
 
-            if inner_conditioning:
+            if self.inner_conditioning:
                 inner_use_linear = layer_use_linear_cross_attn
                 inner_cond_dim = layer_cond_dim
             else:
@@ -1333,9 +1336,10 @@ class Unet(nn.Module):
         # middle layers
 
         mid_dim = dims[-1]
+        mid_context_dim = cond_dim if self.inner_conditioning else None
 
         self.mid_block1 = ResnetBlock(mid_dim, mid_dim, cond_dim = cond_dim, time_cond_dim = time_cond_dim, groups = resnet_groups[-1])
-        self.mid_attn = EinopsToAndFrom('b c h w', 'b (h w) c', Residual(Attention(mid_dim, **attn_kwargs))) if attend_at_middle else None
+        self.mid_attn = EinopsToAndFrom('b c h w', 'b (h w) c', Residual(Attention(mid_dim, context_dim=mid_context_dim, **attn_kwargs))) if attend_at_middle else None
         self.mid_block2 = ResnetBlock(mid_dim, mid_dim, cond_dim = cond_dim, time_cond_dim = time_cond_dim, groups = resnet_groups[-1])
 
         # upsample klass
@@ -1351,7 +1355,7 @@ class Unet(nn.Module):
             layer_use_linear_cross_attn = not layer_cross_attn and use_linear_cross_attn
             layer_cond_dim = cond_dim if layer_cross_attn or layer_use_linear_cross_attn else None
 
-            if inner_conditioning:
+            if self.inner_conditioning:
                 inner_use_linear = layer_use_linear_cross_attn
                 inner_cond_dim = layer_cond_dim
             else:
@@ -1641,7 +1645,8 @@ class Unet(nn.Module):
         x = self.mid_block1(x, t, c)
 
         if exists(self.mid_attn):
-            x = self.mid_attn(x)
+            mid_c = c if self.inner_conditioning else None
+            x = self.mid_attn(x, context=mid_c)
 
         x = self.mid_block2(x, t, c)
 
