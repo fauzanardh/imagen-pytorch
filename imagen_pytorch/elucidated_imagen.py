@@ -369,6 +369,8 @@ class ElucidatedImagen(nn.Module):
         inpaint_images = None,
         inpaint_masks = None,
         inpaint_resample_times = 5,
+        sampler_method = 'heun',
+        init_noise = None,
         **kwargs
     ):
         # get specific sampling hyperparameters for unet
@@ -391,7 +393,9 @@ class ElucidatedImagen(nn.Module):
 
         init_sigma = sigmas[0]
 
-        images = init_sigma * torch.randn(shape, device = self.device)
+        if init_noise is None:
+            init_noise = torch.randn(shape, device = self.device)
+        images = init_sigma * init_noise
 
         # prepare inpainting images and mask
 
@@ -446,20 +450,35 @@ class ElucidatedImagen(nn.Module):
 
                 denoised_over_sigma = (images_hat - model_output) / sigma_hat
 
-                images_next = images_hat + (sigma_next - sigma_hat) * denoised_over_sigma
+                if sampler_method in ("heun", "euler"):
+                    # euler
+                    images_next = images_hat + (sigma_next - sigma_hat) * denoised_over_sigma
 
-                # second order correction, if not the last timestep
+                    # second order correction, if not the last timestep
+                    # heun
+                    if sigma_next != 0 and sampler_method == "heun":
+                        model_output_next = self.preconditioned_network_with_cond_scale(
+                            unet.forward,
+                            images_next,
+                            sigma_next,
+                            **unet_kwargs
+                        )
 
-                if sigma_next != 0:
+                        denoised_prime_over_sigma = (images_next - model_output_next) / sigma_next
+                        images_next = images_hat + 0.5 * (sigma_next - sigma_hat) * (denoised_over_sigma + denoised_prime_over_sigma)
+                elif sampler_method == "dpm-2":
+                    # midpoint method, where the midpoint is chosen according to a rho=3 Karras schedule
+                    sigma_mid = ((sigma_hat ** (1 / 3) + sigma_next ** (1 / 3)) /2) * 3
+
+                    images_hat_2 = images_hat + denoised_over_sigma * (sigma_mid - sigma_hat)
                     model_output_next = self.preconditioned_network_with_cond_scale(
                         unet.forward,
-                        images_next,
-                        sigma_next,
+                        images_hat_2,
+                        sigma_mid,
                         **unet_kwargs
                     )
-
-                    denoised_prime_over_sigma = (images_next - model_output_next) / sigma_next
-                    images_next = images_hat + 0.5 * (sigma_next - sigma_hat) * (denoised_over_sigma + denoised_prime_over_sigma)
+                    denoised_over_sigma_2 = (images_hat_2 - model_output_next) / sigma_mid
+                    images_next = images_hat + denoised_over_sigma_2 * (sigma_next - sigma_hat)
 
                 images = images_next
 
@@ -494,6 +513,8 @@ class ElucidatedImagen(nn.Module):
         return_pil_images = False,
         use_tqdm = True,
         device = None,
+        sampler_method = "heun",
+        init_noise = None,
     ):
         device = default(device, self.device)
         self.reset_unets_all_one_device(device = device)
@@ -560,7 +581,9 @@ class ElucidatedImagen(nn.Module):
                     lowres_cond_img = lowres_cond_img,
                     lowres_noise_times = lowres_noise_times,
                     dynamic_threshold = dynamic_threshold,
-                    use_tqdm = use_tqdm
+                    use_tqdm = use_tqdm,
+                    sampler_method = sampler_method,
+                    init_noise = init_noise,
                 )
 
                 outputs.append(img)
