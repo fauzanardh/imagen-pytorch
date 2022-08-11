@@ -361,6 +361,7 @@ class ImagenTrainer(nn.Module):
                     lr=unet_lr,
                     # eps=unet_eps,
                     beta1=beta1,
+                    weight_decay=1e-2,
                     scale_parameter=False,
                     relative_step=False,
                     warmup_init=False,
