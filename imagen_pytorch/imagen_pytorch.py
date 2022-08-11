@@ -149,8 +149,8 @@ def resize_image_to(image, target_image_size, clamp_range=(-1, 1)):
         image = resize(
             image,
             scale_factors=scale_factors,
-            interp_method=interp_methods.box,
-            antialiasing=False,
+            interp_method=interp_methods.lanczos3,
+            antialiasing=True,
             pad_mode='reflect')
 
     return image.clamp(*clamp_range)
