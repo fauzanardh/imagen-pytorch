@@ -666,7 +666,7 @@ class ImagenTrainer(nn.Module):
             return
 
         last_checkpoint = sorted_checkpoints[0]
-        self.load(last_checkpoint)
+        self.load(last_checkpoint, strict=False)
 
     def save_to_checkpoint_folder(self):
         self.accelerator.wait_for_everyone()
