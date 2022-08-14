@@ -205,6 +205,18 @@ def imagen_sample_in_chunks(fn):
 
     return inner
 
+def try_load_model(state_dict_target, state_dict_from):
+    for name, param in state_dict_from.items():
+        if name not in state_dict_target:
+            continue
+
+        if param.size() == state_dict_target[name].size():
+            state_dict_target[name].copy_(param)
+        else:
+            print(f'parameter {name} size mismatch')
+
+    return state_dict_target
+
 class ImagenTrainer(nn.Module):
     locked = False
 
@@ -756,7 +768,11 @@ class ImagenTrainer(nn.Module):
         if version.parse(__version__) != version.parse(loaded_obj['version']):
             self.print(f'loading saved imagen at version {loaded_obj["version"]}, but current package version is {__version__}')
 
-        self.imagen.load_state_dict(loaded_obj['model'], strict = strict)
+        try:
+            self.imagen.load_state_dict(loaded_obj['model'], strict = strict)
+        except RuntimeError:
+            print("Failed to load the model, trying to load the model partially")
+            self.imagen.load_state_dict(try_load_model(self.imagen.state_dict(), loaded_obj['model']))
         self.steps.copy_(loaded_obj['steps'])
 
         if only_model:
@@ -787,7 +803,11 @@ class ImagenTrainer(nn.Module):
 
         if self.use_ema:
             assert 'ema' in loaded_obj
-            self.ema_unets.load_state_dict(loaded_obj['ema'], strict = strict)
+            try:
+                self.ema_unets.load_state_dict(loaded_obj['ema'], strict = strict)
+            except RuntimeError:
+                print("Failed to load the ema model, trying to load the ema model partially")
+                self.ema_unets.load_state_dict(try_load_model(self.ema_unets.state_dict(), loaded_obj['ema']))
 
         self.print(f'checkpoint loaded from {path}')
         return loaded_obj
