@@ -548,7 +548,7 @@ def Upsample(dim, dim_out = None):
     dim_out = default(dim_out, dim)
 
     return nn.Sequential(
-        nn.Upsample(scale_factor = 2, mode = 'nearest'),
+        nn.Upsample(scale_factor = 2, mode = 'bilinear'),
         nn.Conv2d(dim, dim_out, 3, padding = 1)
     )
 
