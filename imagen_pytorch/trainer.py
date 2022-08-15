@@ -384,7 +384,7 @@ class ImagenTrainer(nn.Module):
                 warmup_scheduler = warmup.LinearWarmup(optimizer, warmup_period = unet_warmup_steps)
 
                 if not exists(scheduler):
-                    scheduler = LambdaLR(optimizer, lr_lambda = lambda step: 5000.0)
+                    scheduler = LambdaLR(optimizer, lr_lambda = lambda step: unet_warmup_steps)
 
             # set on object
 
