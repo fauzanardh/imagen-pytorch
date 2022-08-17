@@ -430,13 +430,9 @@ class ElucidatedImagen(nn.Module):
                 is_last_resample_step = r == 0
 
                 # stochastic sampling
+                eps = hp.S_noise * torch.randn(shape, device = self.device)
                 sigma_hat = sigma + gamma * sigma
-                if gamma > 0:
-                    eps = hp.S_noise * torch.randn(shape, device = self.device)
-                    added_noise = sqrt(sigma_hat ** 2 - sigma ** 2) * eps
-                    images_hat = images + added_noise
-                else:
-                    images_hat = images
+                added_noise = sqrt(sigma_hat ** 2 - sigma ** 2) * eps
 
                 if has_inpainting:
                     images_hat = images_hat * ~inpaint_masks + (inpaint_images + added_noise) * inpaint_masks
@@ -450,35 +446,20 @@ class ElucidatedImagen(nn.Module):
 
                 denoised_over_sigma = (images_hat - model_output) / sigma_hat
 
-                if sampler_method in ("heun", "euler"):
-                    # euler
-                    images_next = images_hat + (sigma_next - sigma_hat) * denoised_over_sigma
+                images_next = images_hat + (sigma_next - sigma_hat) * denoised_over_sigma
 
-                    # second order correction, if not the last timestep
-                    # heun
-                    if sigma_next != 0 and sampler_method == "heun":
-                        model_output_next = self.preconditioned_network_with_cond_scale(
-                            unet.forward,
-                            images_next,
-                            sigma_next,
-                            **unet_kwargs
-                        )
+                # second order correction, if not the last timestep
 
-                        denoised_prime_over_sigma = (images_next - model_output_next) / sigma_next
-                        images_next = images_hat + 0.5 * (sigma_next - sigma_hat) * (denoised_over_sigma + denoised_prime_over_sigma)
-                elif sampler_method == "dpm-2":
-                    # midpoint method, where the midpoint is chosen according to a rho=3 Karras schedule
-                    sigma_mid = ((sigma_hat ** (1 / 3) + sigma_next ** (1 / 3)) /2) * 3
-
-                    images_hat_2 = images_hat + denoised_over_sigma * (sigma_mid - sigma_hat)
+                if sigma_next != 0:
                     model_output_next = self.preconditioned_network_with_cond_scale(
                         unet.forward,
-                        images_hat_2,
-                        sigma_mid,
+                        images_next,
+                        sigma_next,
                         **unet_kwargs
                     )
-                    denoised_over_sigma_2 = (images_hat_2 - model_output_next) / sigma_mid
-                    images_next = images_hat + denoised_over_sigma_2 * (sigma_next - sigma_hat)
+
+                    denoised_prime_over_sigma = (images_next - model_output_next) / sigma_next
+                    images_next = images_hat + 0.5 * (sigma_next - sigma_hat) * (denoised_over_sigma + denoised_prime_over_sigma)
 
                 images = images_next
 
