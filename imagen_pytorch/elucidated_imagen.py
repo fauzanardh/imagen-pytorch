@@ -441,8 +441,8 @@ class ElucidatedImagen(nn.Module):
                 if has_inpainting:
                     images_hat = images_hat * ~inpaint_masks + (inpaint_images + added_noise) * inpaint_masks
 
-                model_output = self.preconditioned_network_with_cond_scale(
-                    unet.forward,
+                model_output = self.preconditioned_network_forward(
+                    unet.forward_with_cond_scale,
                     images_hat,
                     sigma_hat,
                     **unet_kwargs
@@ -457,8 +457,8 @@ class ElucidatedImagen(nn.Module):
                     # second order correction, if not the last timestep
                     # heun
                     if sigma_next != 0 and sampler_method == "heun":
-                        model_output_next = self.preconditioned_network_with_cond_scale(
-                            unet.forward,
+                        model_output_next = self.preconditioned_network_forward(
+                            unet.forward_with_cond_scale,
                             images_next,
                             sigma_next,
                             **unet_kwargs
@@ -471,8 +471,8 @@ class ElucidatedImagen(nn.Module):
                     sigma_mid = ((sigma_hat ** (1 / 3) + sigma_next ** (1 / 3)) /2) * 3
 
                     images_hat_2 = images_hat + denoised_over_sigma * (sigma_mid - sigma_hat)
-                    model_output_next = self.preconditioned_network_with_cond_scale(
-                        unet.forward,
+                    model_output_next = self.preconditioned_network_forward(
+                        unet.forward_with_cond_scale,
                         images_hat_2,
                         sigma_mid,
                         **unet_kwargs
