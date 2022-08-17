@@ -434,6 +434,8 @@ class ElucidatedImagen(nn.Module):
                 sigma_hat = sigma + gamma * sigma
                 added_noise = sqrt(sigma_hat ** 2 - sigma ** 2) * eps
 
+                images_hat = images + added_noise
+
                 if has_inpainting:
                     images_hat = images_hat * ~inpaint_masks + (inpaint_images + added_noise) * inpaint_masks
 
