@@ -1106,6 +1106,7 @@ class Unet(nn.Module):
         combine_upsample_fmaps = False,      # combine feature maps from all upsample blocks, used in unet squared successfully
         pixel_shuffle_upsample = True,       # may address checkboard artifacts
         inner_conditioning = False,
+        allow_identity_for_text_to_cond = False,
     ):
         super().__init__()
 
@@ -1205,7 +1206,10 @@ class Unet(nn.Module):
 
         if cond_on_text:
             assert exists(text_embed_dim), 'text_embed_dim must be given to the unet if cond_on_text is True'
-            self.text_to_cond = nn.Linear(text_embed_dim, cond_dim)
+            if allow_identity_for_text_to_cond and text_embed_dim == cond_dim:
+                self.text_to_cond = Identity()
+            else:
+                self.text_to_cond = nn.Linear(text_embed_dim, cond_dim)
 
         # finer control over whether to condition on text encodings
 
