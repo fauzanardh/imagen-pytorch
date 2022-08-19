@@ -764,7 +764,7 @@ class ImagenTrainer(nn.Module):
 
         self.print(f'checkpoint saved to {path}')
 
-    def load(self, path, only_model = False, strict = True, noop_if_not_exist = False):
+    def load(self, path, only_model = False, strict = False, noop_if_not_exist = False):
         fs = self.fs
 
         if noop_if_not_exist and not fs.exists(path):
