@@ -28,6 +28,7 @@ setup(
   install_requires=[
     'accelerate',
     'click',
+    'resize-right',
     'einops>=0.4',
     'einops-exts',
     'ema-pytorch>=0.0.3',
