@@ -1104,7 +1104,8 @@ class Unet(nn.Module):
         cosine_sim_attn = False,
         self_cond = False,
         combine_upsample_fmaps = False,      # combine feature maps from all upsample blocks, used in unet squared successfully
-        pixel_shuffle_upsample = True        # may address checkboard artifacts
+        pixel_shuffle_upsample = True,       # may address checkboard artifacts
+        inner_conditioning = False,
     ):
         super().__init__()
 
@@ -1276,6 +1277,9 @@ class Unet(nn.Module):
         layer_params = [num_resnet_blocks, resnet_groups, layer_attns, layer_attns_depth, layer_cross_attns]
         reversed_layer_params = list(map(reversed, layer_params))
 
+        # inner conditioning
+        self.inner_conditioning = inner_conditioning
+
         # downsampling layers
 
         skip_connect_dims = [] # keep track of skip connection dimensions
@@ -1285,6 +1289,13 @@ class Unet(nn.Module):
 
             layer_use_linear_cross_attn = not layer_cross_attn and use_linear_cross_attn
             layer_cond_dim = cond_dim if layer_cross_attn or layer_use_linear_cross_attn else None
+
+            if self.inner_conditioning:
+                inner_use_linear = layer_use_linear_cross_attn
+                inner_cond_dim = layer_cond_dim
+            else:
+                inner_use_linear = None
+                inner_cond_dim = None
 
             transformer_block_klass = TransformerBlock if layer_attn else (LinearAttentionTransformerBlock if use_linear_attn else Identity)
 
@@ -1309,7 +1320,7 @@ class Unet(nn.Module):
             self.downs.append(nn.ModuleList([
                 pre_downsample,
                 resnet_klass(current_dim, current_dim, cond_dim = layer_cond_dim, linear_attn = layer_use_linear_cross_attn, time_cond_dim = time_cond_dim, groups = groups),
-                nn.ModuleList([ResnetBlock(current_dim, current_dim, time_cond_dim = time_cond_dim, groups = groups, use_gca = use_global_context_attn) for _ in range(layer_num_resnet_blocks)]),
+                nn.ModuleList([ResnetBlock(current_dim, current_dim, cond_dim=inner_cond_dim, linear_attn=inner_use_linear, time_cond_dim = time_cond_dim, groups = groups, use_gca = use_global_context_attn) for _ in range(layer_num_resnet_blocks)]),
                 transformer_block_klass(dim = current_dim, depth = layer_attn_depth, ff_mult = ff_mult, context_dim = cond_dim, **attn_kwargs),
                 post_downsample
             ]))
@@ -1317,9 +1328,10 @@ class Unet(nn.Module):
         # middle layers
 
         mid_dim = dims[-1]
+        mid_context_dim = cond_dim if self.inner_conditioning else None 
 
         self.mid_block1 = ResnetBlock(mid_dim, mid_dim, cond_dim = cond_dim, time_cond_dim = time_cond_dim, groups = resnet_groups[-1])
-        self.mid_attn = EinopsToAndFrom('b c h w', 'b (h w) c', Residual(Attention(mid_dim, **attn_kwargs))) if attend_at_middle else None
+        self.mid_attn = EinopsToAndFrom('b c h w', 'b (h w) c', Residual(Attention(mid_dim, context_dim=mid_context_dim, **attn_kwargs))) if attend_at_middle else None
         self.mid_block2 = ResnetBlock(mid_dim, mid_dim, cond_dim = cond_dim, time_cond_dim = time_cond_dim, groups = resnet_groups[-1])
 
         # upsample klass
@@ -1334,6 +1346,14 @@ class Unet(nn.Module):
             is_last = ind == (len(in_out) - 1)
             layer_use_linear_cross_attn = not layer_cross_attn and use_linear_cross_attn
             layer_cond_dim = cond_dim if layer_cross_attn or layer_use_linear_cross_attn else None
+
+            if self.inner_conditioning:
+                inner_use_linear = layer_use_linear_cross_attn
+                inner_cond_dim = layer_cond_dim
+            else:
+                inner_use_linear = None
+                inner_cond_dim = None
+
             transformer_block_klass = TransformerBlock if layer_attn else (LinearAttentionTransformerBlock if use_linear_attn else Identity)
 
             skip_connect_dim = skip_connect_dims.pop()
@@ -1342,7 +1362,7 @@ class Unet(nn.Module):
 
             self.ups.append(nn.ModuleList([
                 resnet_klass(dim_out + skip_connect_dim, dim_out, cond_dim = layer_cond_dim, linear_attn = layer_use_linear_cross_attn, time_cond_dim = time_cond_dim, groups = groups),
-                nn.ModuleList([ResnetBlock(dim_out + skip_connect_dim, dim_out, time_cond_dim = time_cond_dim, groups = groups, use_gca = use_global_context_attn) for _ in range(layer_num_resnet_blocks)]),
+                nn.ModuleList([ResnetBlock(dim_out + skip_connect_dim, dim_out, cond_dim=inner_cond_dim, linear_attn=inner_use_linear, time_cond_dim = time_cond_dim, groups = groups, use_gca = use_global_context_attn) for _ in range(layer_num_resnet_blocks)]),
                 transformer_block_klass(dim = dim_out, depth = layer_attn_depth, ff_mult = ff_mult, context_dim = cond_dim, **attn_kwargs),
                 upsample_klass(dim_out, dim_in) if not is_last or memory_efficient else Identity()
             ]))
@@ -1606,7 +1626,7 @@ class Unet(nn.Module):
             x = init_block(x, t, c)
 
             for resnet_block in resnet_blocks:
-                x = resnet_block(x, t)
+                x = resnet_block(x, t, c)
                 hiddens.append(x)
 
             x = attn_block(x, c)
@@ -1618,7 +1638,8 @@ class Unet(nn.Module):
         x = self.mid_block1(x, t, c)
 
         if exists(self.mid_attn):
-            x = self.mid_attn(x)
+            mid_c = c if self.inner_conditioning else None
+            x = self.mid_attn(x, context=mid_c)
 
         x = self.mid_block2(x, t, c)
 
@@ -1632,7 +1653,7 @@ class Unet(nn.Module):
 
             for resnet_block in resnet_blocks:
                 x = add_skip_connection(x)
-                x = resnet_block(x, t)
+                x = resnet_block(x, t, c)
 
             x = attn_block(x, c)
             up_hiddens.append(x.contiguous())
