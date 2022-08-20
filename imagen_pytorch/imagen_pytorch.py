@@ -2,7 +2,7 @@ import math
 import copy
 from random import random
 from typing import List, Union
-from tqdm.auto import tqdm
+from tqdm.autonotebook import tqdm
 from functools import partial, wraps
 from contextlib import contextmanager, nullcontext
 from collections import namedtuple
