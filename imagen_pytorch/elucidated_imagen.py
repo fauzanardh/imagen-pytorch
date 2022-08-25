@@ -344,7 +344,8 @@ class ElucidatedImagen(nn.Module):
         cond_scale = 1.0,
         **kwargs,
     ):
-        logits = self.preconditioned_network_forward(*args, **kwargs)
+        cond_drop_prob = 1. if cond_scale == 0.0 else 0.
+        logits = self.preconditioned_network_forward(*args, cond_drop_prob = cond_drop_prob, **kwargs)
 
         if cond_scale <= 1.0:
             return logits
