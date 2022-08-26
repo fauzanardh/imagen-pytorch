@@ -238,14 +238,17 @@ class GaussianDiffusionContinuousTimes(nn.Module):
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
     def q_sample(self, x_start, t, noise = None):
+        dtype = x_start.dtype
+
         if isinstance(t, float):
             batch = x_start.shape[0]
-            t = torch.full((batch,), t, device = x_start.device, dtype = x_start.dtype)
+            t = torch.full((batch,), t, device = x_start.device, dtype = dtype)
 
         noise = default(noise, lambda: torch.randn_like(x_start))
-        log_snr = self.log_snr(t)
+        log_snr = self.log_snr(t).type(dtype)
         log_snr_padded_dim = right_pad_dims_to(x_start, log_snr)
         alpha, sigma =  log_snr_to_alpha_sigma(log_snr_padded_dim)
+
         return alpha * x_start + sigma * noise, log_snr
 
     def q_sample_from_to(self, x_from, from_t, to_t, noise = None):
@@ -279,34 +282,26 @@ class GaussianDiffusionContinuousTimes(nn.Module):
 # norms and residuals
 
 class LayerNorm(nn.Module):
-    def __init__(self, dim, stable = False):
+    def __init__(self, feats, stable = False, dim = -1):
         super().__init__()
         self.stable = stable
-        self.g = nn.Parameter(torch.ones(dim))
+        self.dim = dim
+
+        self.g = nn.Parameter(torch.ones(feats, *((1,) * (-dim - 1))))
 
     def forward(self, x):
+        dtype, dim = x.dtype, self.dim
+
         if self.stable:
-            x = x / x.amax(dim = -1, keepdim = True).detach()
+            x = x / x.amax(dim = dim, keepdim = True).detach()
 
         eps = 1e-5 if x.dtype == torch.float32 else 1e-3
-        var = torch.var(x, dim = -1, unbiased = False, keepdim = True)
-        mean = torch.mean(x, dim = -1, keepdim = True)
-        return (x - mean) * (var + eps).rsqrt() * self.g
+        var = torch.var(x, dim = dim, unbiased = False, keepdim = True)
+        mean = torch.mean(x, dim = dim, keepdim = True)
 
-class ChanLayerNorm(nn.Module):
-    def __init__(self, dim, stable = False):
-        super().__init__()
-        self.stable = stable
-        self.g = nn.Parameter(torch.ones(1, dim, 1, 1))
+        return (x - mean) * (var + eps).rsqrt().type(dtype) * self.g.type(dtype)
 
-    def forward(self, x):
-        if self.stable:
-            x = x / x.amax(dim = 1, keepdim = True).detach()
-
-        eps = 1e-5 if x.dtype == torch.float32 else 1e-3
-        var = torch.var(x, dim = 1, unbiased = False, keepdim = True)
-        mean = torch.mean(x, dim = 1, keepdim = True)
-        return (x - mean) * (var + eps).rsqrt() * self.g
+ChanLayerNorm = partial(LayerNorm, dim = -3)
 
 class Always():
     def __init__(self, val):
@@ -395,7 +390,8 @@ class PerceiverAttention(nn.Module):
 
         # attention
 
-        attn = sim.softmax(dim = -1)
+        attn = sim.softmax(dim = -1, dtype = torch.float32)
+        attn = attn.to(sim.dtype)
 
         out = einsum('... i j, ... j d -> ... i d', attn, v)
         out = rearrange(out, 'b h n d -> b n (h d)', h = h)
@@ -492,6 +488,7 @@ class Attention(nn.Module):
         b, n, device = *x.shape[:2], x.device
 
         x = self.norm(x)
+
         q, k, v = (self.to_q(x), *self.to_kv(x).chunk(2, dim = -1))
 
         q = rearrange(q, 'b n (h d) -> b h n d', h = self.heads)
@@ -536,7 +533,8 @@ class Attention(nn.Module):
 
         # attention
 
-        attn = sim.softmax(dim = -1)
+        attn = sim.softmax(dim = -1, dtype = torch.float32)
+        attn = attn.to(sim.dtype)
 
         # aggregate values
 
@@ -586,8 +584,13 @@ class PixelShuffleUpsample(nn.Module):
         return self.net(x)
 
 def Downsample(dim, dim_out = None):
+    # https://arxiv.org/abs/2208.03641 shows this is the most optimal way to downsample
+    # named SP-conv in the paper, but basically a pixel unshuffle
     dim_out = default(dim_out, dim)
-    return nn.Conv2d(dim, dim_out, 4, 2, 1)
+    return nn.Sequential(
+        Rearrange('b c (h s1) (w s2) -> b (c s1 s2) h w', s1 = 2, s2 = 2),
+        nn.Conv2d(dim * 4, dim_out, 1)
+    )
 
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim):
@@ -779,6 +782,7 @@ class CrossAttention(nn.Module):
             sim = sim.masked_fill(~mask, max_neg_value)
 
         attn = sim.softmax(dim = -1, dtype = torch.float32)
+        attn = attn.to(sim.dtype)
 
         out = einsum('b h i j, b h j d -> b h i d', attn, v)
         out = rearrange(out, 'b h n d -> b n (h d)')
