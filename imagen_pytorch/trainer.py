@@ -383,7 +383,6 @@ class ImagenTrainer(nn.Module):
                 optimizer = Adafactor(
                     unet.parameters(),
                     lr=unet_lr,
-                    clip_threshold=2.0,
                     # eps=unet_eps,
                     # beta1=beta1,
                     weight_decay=1e-2,
