@@ -384,7 +384,7 @@ class ImagenTrainer(nn.Module):
                     unet.parameters(),
                     lr=unet_lr,
                     # eps=unet_eps,
-                    beta1=beta1,
+                    # beta1=beta1,
                     weight_decay=1e-2,
                     scale_parameter=False,
                     relative_step=True if unet_lr is None else False,
