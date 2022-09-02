@@ -380,30 +380,17 @@ class ImagenTrainer(nn.Module):
                             module, "weight", {"optim_bits": 32}
                         )
             elif optimizer_class == "adafactor":
-                if unet_lr is None:
-                    optimizer = Adafactor(
-                        unet.parameters(),
-                        lr=unet_lr,
-                        # eps=unet_eps,
-                        beta1=beta1,
-                        weight_decay=1e-2,
-                        scale_parameter=True,
-                        relative_step=True,
-                        warmup_init=True,
-                        **kwargs,
-                    )
-                else:
-                    optimizer = Adafactor(
-                        unet.parameters(),
-                        lr=unet_lr,
-                        # eps=unet_eps,
-                        beta1=beta1,
-                        weight_decay=1e-2,
-                        scale_parameter=False,
-                        relative_step=False,
-                        warmup_init=False,
-                        **kwargs,
-                    )
+                optimizer = Adafactor(
+                    unet.parameters(),
+                    lr=unet_lr,
+                    # eps=unet_eps,
+                    beta1=beta1,
+                    weight_decay=1e-2,
+                    scale_parameter=True if unet_lr is None else False,
+                    relative_step=True if unet_lr is None else False,
+                    warmup_init=True if unet_lr is None else False,
+                    **kwargs,
+                )
 
                 adafactor_scheduler = AdafactorSchedule(optimizer)
                 setattr(self, f'adafactor_scheduler{ind}', adafactor_scheduler)
