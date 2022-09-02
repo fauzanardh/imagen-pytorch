@@ -387,12 +387,12 @@ class ImagenTrainer(nn.Module):
                     # beta1=beta1,
                     weight_decay=1e-2,
                     scale_parameter=False,
-                    relative_step=True if unet_lr is None else False,
-                    warmup_init=True if unet_lr is None else False,
+                    relative_step=False if unet_lr else True,
+                    warmup_init=False if unet_lr else True,
                     **kwargs,
                 )
 
-                adafactor_scheduler = AdafactorSchedule(optimizer, initial_lr=0.0 if unet_lr is None else unet_lr)
+                adafactor_scheduler = AdafactorSchedule(optimizer, initial_lr=unet_lr if unet_lr else 0.0)
                 setattr(self, f'adafactor_scheduler{ind}', adafactor_scheduler)
             else:
                 raise NotImplementedError(f"optimizer {optimizer_class} not implemented")
