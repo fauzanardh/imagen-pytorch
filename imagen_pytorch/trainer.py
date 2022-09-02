@@ -502,7 +502,7 @@ class ImagenTrainer(nn.Module):
 
         adafactor_scheduler = getattr(self, f'adafactor_scheduler{unet_index}', None)
         if adafactor_scheduler:
-            return adafactor_scheduler.get_lr()
+            return adafactor_scheduler.get_lr()[0]
         else:
             return optim.param_groups[0]['lr']
 
