@@ -392,7 +392,7 @@ class ImagenTrainer(nn.Module):
                     **kwargs,
                 )
 
-                adafactor_scheduler = AdafactorSchedule(optimizer)
+                adafactor_scheduler = AdafactorSchedule(optimizer, initial_lr=0.0 if unet_lr is None else unet_lr)
                 setattr(self, f'adafactor_scheduler{ind}', adafactor_scheduler)
             else:
                 raise NotImplementedError(f"optimizer {optimizer_class} not implemented")
