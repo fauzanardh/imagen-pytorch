@@ -28,7 +28,7 @@ import numpy as np
 
 from ema_pytorch import EMA
 from bitsandbytes.optim import Adam8bit, AdamW8bit, GlobalOptimManager
-from transformers.optimization import Adafactor
+from transformers.optimization import Adafactor, AdafactorSchedule
 
 from accelerate import Accelerator, DistributedType, DistributedDataParallelKwargs
 
@@ -380,17 +380,33 @@ class ImagenTrainer(nn.Module):
                             module, "weight", {"optim_bits": 32}
                         )
             elif optimizer_class == "adafactor":
-                optimizer = Adafactor(
-                    unet.parameters(),
-                    lr=unet_lr,
-                    # eps=unet_eps,
-                    beta1=beta1,
-                    weight_decay=1e-2,
-                    scale_parameter=False,
-                    relative_step=False,
-                    warmup_init=False,
-                    **kwargs,
-                )
+                if unet_lr is None:
+                    optimizer = Adafactor(
+                        unet.parameters(),
+                        lr=unet_lr,
+                        # eps=unet_eps,
+                        beta1=beta1,
+                        weight_decay=1e-2,
+                        scale_parameter=True,
+                        relative_step=True,
+                        warmup_init=True,
+                        **kwargs,
+                    )
+                else:
+                    optimizer = Adafactor(
+                        unet.parameters(),
+                        lr=unet_lr,
+                        # eps=unet_eps,
+                        beta1=beta1,
+                        weight_decay=1e-2,
+                        scale_parameter=False,
+                        relative_step=False,
+                        warmup_init=False,
+                        **kwargs,
+                    )
+
+                adafactor_scheduler = AdafactorSchedule(optimizer)
+                setattr(self, f'adafactor_scheduler{ind}', adafactor_scheduler)
             else:
                 raise NotImplementedError(f"optimizer {optimizer_class} not implemented")
 
@@ -484,7 +500,11 @@ class ImagenTrainer(nn.Module):
 
         optim = getattr(self, f'optim{unet_index}')
 
-        return optim.param_groups[0]['lr']
+        adafactor_scheduler = getattr(self, f'adafactor_scheduler{unet_index}', None)
+        if adafactor_scheduler:
+            return adafactor_scheduler.get_lr()
+        else:
+            return optim.param_groups[0]['lr']
 
     # function for allowing only one unet from being trained at a time
 
