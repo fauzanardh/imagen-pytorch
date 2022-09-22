@@ -27,7 +27,6 @@ from packaging import version
 import numpy as np
 
 from ema_pytorch import EMA
-from bitsandbytes.optim import Adam8bit, AdamW8bit, GlobalOptimManager
 from transformers.optimization import Adafactor, AdafactorSchedule
 
 from accelerate import Accelerator, DistributedType, DistributedDataParallelKwargs
@@ -353,32 +352,6 @@ class ImagenTrainer(nn.Module):
                     betas=(beta1, beta2),
                     **kwargs,
                 )
-            elif optimizer_class == "adam8bit":
-                optimizer = Adam8bit(
-                    unet.parameters(),
-                    lr=unet_lr,
-                    eps=unet_eps,
-                    betas=(beta1, beta2),
-                    **kwargs,
-                )
-                for module in unet.modules():
-                    if isinstance(module, nn.Embedding):
-                        GlobalOptimManager.get_instance().register_module_override(
-                            module, "weight", {"optim_bits": 32}
-                        )
-            elif optimizer_class == "adamw8bit":
-                optimizer = AdamW8bit(
-                    unet.parameters(),
-                    lr=unet_lr,
-                    eps=unet_eps,
-                    betas=(beta1, beta2),
-                    **kwargs,
-                )
-                for module in unet.modules():
-                    if isinstance(module, nn.Embedding):
-                        GlobalOptimManager.get_instance().register_module_override(
-                            module, "weight", {"optim_bits": 32}
-                        )
             elif optimizer_class == "adafactor":
                 optimizer = Adafactor(
                     unet.parameters(),
