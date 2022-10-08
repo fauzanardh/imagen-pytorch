@@ -715,6 +715,19 @@ class ResnetBlock(nn.Module):
 
         return h + self.res_conv(x)
 
+class FlashCrossAttention(nn.Module):
+    def __init__(
+        self,
+        dim,
+        *,
+        context_dim = None,
+        dim_head = 64,
+        heads = 8,
+        norm_context = False,
+        cosine_sim_attn = False,
+    ):
+        pass
+
 class CrossAttention(nn.Module):
     def __init__(
         self,
@@ -2197,7 +2210,8 @@ class Imagen(nn.Module):
         return_all_unet_outputs = False,
         return_pil_images = False,
         device = None,
-        use_tqdm = True
+        use_tqdm = True,
+        image_ratio = 1.,
     ):
         device = default(device, self.device)
         self.reset_unets_all_one_device(device = device)
@@ -2281,7 +2295,12 @@ class Imagen(nn.Module):
 
             with context:
                 lowres_cond_img = lowres_noise_times = None
-                shape = (batch_size, channel, *frame_dims, image_size, image_size)
+                image_height = image_size
+                if exists(image_ratio):
+                    multiple = 8
+                    image_height = int(image_height * image_ratio)
+                    image_height = ((image_height + multiple - 1) // multiple) * multiple
+                shape = (batch_size, channel, *frame_dims, image_height, image_size)
 
                 if unet.lowres_cond:
                     lowres_noise_times = self.lowres_noise_schedule.get_times(batch_size, lowres_sample_noise_level, device = device)
@@ -2294,7 +2313,11 @@ class Imagen(nn.Module):
                 if exists(unet_init_images):
                     unet_init_images = self.resize_to(unet_init_images, image_size)
 
-                shape = (batch_size, self.channels, *frame_dims, image_size, image_size)
+                if exists(image_ratio):
+                    multiple = 8
+                    image_height = int(image_height * image_ratio)
+                    image_height = ((image_height + multiple - 1) // multiple) * multiple
+                shape = (batch_size, channel, *frame_dims, image_height, image_size)
 
                 img = self.p_sample_loop(
                     unet,
