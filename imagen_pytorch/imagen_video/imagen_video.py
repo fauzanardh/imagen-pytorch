@@ -488,7 +488,7 @@ class PixelShuffleUpsample(nn.Module):
 
         self.net = nn.Sequential(
             conv,
-            nn.GELU()
+            nn.SiLU()
         )
 
         self.pixel_shuffle = nn.PixelShuffle(2)
@@ -551,7 +551,7 @@ class Block(nn.Module):
     ):
         super().__init__()
         self.groupnorm = nn.GroupNorm(groups, dim) if norm else Identity()
-        self.activation = nn.GELU()
+        self.activation = nn.SiLU()
         self.project = Conv2d(dim, dim_out, 3, padding = 1)
 
     def forward(self, x, scale_shift = None):
@@ -584,7 +584,7 @@ class ResnetBlock(nn.Module):
 
         if exists(time_cond_dim):
             self.time_mlp = nn.Sequential(
-                nn.GELU(),
+                nn.SiLU(),
                 nn.Linear(time_cond_dim, dim_out * 2)
             )
 
@@ -763,7 +763,7 @@ class LinearAttention(nn.Module):
         inner_dim = dim_head * heads
         self.norm = ChanLayerNorm(dim)
 
-        self.nonlin = nn.GELU()
+        self.nonlin = nn.SiLU()
 
         self.to_q = nn.Sequential(
             nn.Dropout(dropout),
@@ -831,7 +831,7 @@ class GlobalContext(nn.Module):
 
         self.net = nn.Sequential(
             Conv2d(dim_in, hidden_dim, 1),
-            nn.GELU(),
+            nn.SiLU(),
             Conv2d(hidden_dim, dim_out, 1),
             nn.Sigmoid()
         )
@@ -992,14 +992,14 @@ class DynamicPositionBias(nn.Module):
         self.mlp.append(nn.Sequential(
             nn.Linear(1, dim),
             LayerNorm(dim),
-            nn.GELU()
+            nn.SiLU()
         ))
 
         for _ in range(max(depth - 1, 0)):
             self.mlp.append(nn.Sequential(
                 nn.Linear(dim, dim),
                 LayerNorm(dim),
-                nn.GELU()
+                nn.SiLU()
             ))
 
         self.mlp.append(nn.Linear(dim, heads))
@@ -1128,7 +1128,7 @@ class Unet3D(nn.Module):
         self.to_time_hiddens = nn.Sequential(
             sinu_pos_emb,
             nn.Linear(sinu_pos_emb_input_dim, time_cond_dim),
-            nn.GELU()
+            nn.SiLU()
         )
 
         self.to_time_cond = nn.Sequential(
@@ -1150,7 +1150,7 @@ class Unet3D(nn.Module):
             self.to_lowres_time_hiddens = nn.Sequential(
                 LearnedSinusoidalPosEmb(learned_sinu_pos_emb_dim),
                 nn.Linear(learned_sinu_pos_emb_dim + 1, time_cond_dim),
-                nn.GELU()
+                nn.SiLU()
             )
 
             self.to_lowres_time_cond = nn.Sequential(
@@ -1197,7 +1197,7 @@ class Unet3D(nn.Module):
             self.to_text_non_attn_cond = nn.Sequential(
                 nn.LayerNorm(cond_dim),
                 nn.Linear(cond_dim, time_cond_dim),
-                nn.GELU(),
+                nn.SiLU(),
                 nn.Linear(time_cond_dim, time_cond_dim)
             )
 
