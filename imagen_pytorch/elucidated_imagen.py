@@ -760,7 +760,7 @@ class ElucidatedImagen(nn.Module):
 
         check_shape(images, 'b c ...', c = self.channels)
 
-        assert h >= target_image_size[0] and w >= target_image_size[1]
+        # assert h >= target_image_size[0] and w >= target_image_size[1]
 
         if exists(texts) and not exists(text_embeds) and not self.unconditional:
             assert all([*map(len, texts)]), 'text cannot be empty'
