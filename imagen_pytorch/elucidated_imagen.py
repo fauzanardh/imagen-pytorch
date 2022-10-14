@@ -14,6 +14,7 @@ from torch.nn.parallel import DistributedDataParallel
 import torchvision.transforms as T
 
 import kornia.augmentation as K
+from resize_right import resize, interp_methods
 
 from einops import rearrange, repeat, reduce
 from einops_exts import rearrange_many
@@ -33,7 +34,7 @@ from imagen_pytorch.imagen_pytorch import (
     eval_decorator,
     check_shape,
     pad_tuple_to_length,
-    resize_image_to,
+    # resize_image_to, use custom implementation
     right_pad_dims_to,
     module_device,
     normalize_neg_one_to_one,
@@ -69,6 +70,26 @@ Hparams = namedtuple('Hparams', Hparams_fields)
 
 def log(t, eps = 1e-20):
     return torch.log(t.clamp(min = eps))
+
+def resize_image_to(image, target_image_size, clamp_range=(-1, 1)):
+    orig_image_size_h, orig_image_size_w = image.shape[-2], image.shape[-1]
+    orig_image_size_area = orig_image_size_h * orig_image_size_w
+    target_image_size_h, target_image_size_w = target_image_size
+    target_image_size_area = target_image_size_h * target_image_size_w
+
+    if orig_image_size_area == target_image_size_area:
+        return image
+
+    scale_factors = sqrt(target_image_size_area) / sqrt(orig_image_size_area)
+    image = resize(
+        image,
+        scale_factors=scale_factors,
+        interp_method=interp_methods.lanczos3,
+        antialiasing=True,
+        pad_mode="reflect",
+    )
+
+    return image.clamp(*clamp_range)
 
 # main class
 
@@ -639,7 +660,7 @@ class ElucidatedImagen(nn.Module):
             with context:
                 lowres_cond_img = lowres_noise_times = None
 
-                shape = (batch_size, channel, *frame_dims, image_size, image_size)
+                shape = (batch_size, channel, *frame_dims, image_size[0], image_size[1])
 
                 if unet.lowres_cond:
                     lowres_noise_times = self.lowres_noise_schedule.get_times(batch_size, lowres_sample_noise_level, device = device)
@@ -652,7 +673,7 @@ class ElucidatedImagen(nn.Module):
                 if exists(unet_init_images):
                     unet_init_images = self.resize_to(unet_init_images, image_size)
 
-                shape = (batch_size, self.channels, *frame_dims, image_size, image_size)
+                shape = (batch_size, self.channels, *frame_dims, image_size[0], image_size[1])
 
                 img = self.one_unet_sample(
                     unet,
@@ -739,7 +760,7 @@ class ElucidatedImagen(nn.Module):
 
         check_shape(images, 'b c ...', c = self.channels)
 
-        assert h >= target_image_size and w >= target_image_size
+        assert h >= target_image_size[0] and w >= target_image_size[1]
 
         if exists(texts) and not exists(text_embeds) and not self.unconditional:
             assert all([*map(len, texts)]), 'text cannot be empty'

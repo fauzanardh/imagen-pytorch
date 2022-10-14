@@ -107,7 +107,7 @@ class ImagenConfig(AllowExtraBaseModel):
 
 class ElucidatedImagenConfig(AllowExtraBaseModel):
     unets:                  ListOrTuple(Union[UnetConfig, Unet3DConfig, NullUnetConfig])
-    image_sizes:            ListOrTuple(int)
+    image_sizes:            ListOrTuple(Union[int, Tuple[int, int]])
     video:                  bool = False
     text_encoder_name:      str = DEFAULT_T5_NAME
     channels:               int = 3
