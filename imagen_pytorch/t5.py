@@ -86,7 +86,9 @@ def t5_encode_tokenized_text(
     token_ids,
     attn_mask = None,
     pad_id = None,
-    name = DEFAULT_T5_NAME
+    name = DEFAULT_T5_NAME,
+    return_hidden_layer_num = None,
+    do_final_ln = False,
 ):
     assert exists(attn_mask) or exists(pad_id)
     t5, _ = get_model_and_tokenizer(name)
@@ -96,8 +98,14 @@ def t5_encode_tokenized_text(
     t5.eval()
 
     with torch.no_grad():
-        output = t5(input_ids = token_ids, attention_mask = attn_mask)
-        encoded_text = output.last_hidden_state.detach()
+        output = t5(input_ids = token_ids, attention_mask = attn_mask, output_hidden_states=return_hidden_layer_num is not None)
+        if return_hidden_layer_num is not None:
+            encoded_text = output.hidden_states[return_hidden_layer_num]
+            if do_final_ln:
+                encoded_text = t5.encoder.final_layer_norm(encoded_text)
+            encoded_text = encoded_text.detach()
+        else:
+            encoded_text = output.last_hidden_state.detach()
 
     attn_mask = attn_mask.bool()
 
@@ -107,10 +115,12 @@ def t5_encode_tokenized_text(
 def t5_encode_text(
     texts: List[str],
     name = DEFAULT_T5_NAME,
-    return_attn_mask = False
+    return_attn_mask = False,
+    return_hidden_layer_num = None,
+    do_final_ln = False,
 ):
     token_ids, attn_mask = t5_tokenize(texts, name = name)
-    encoded_text = t5_encode_tokenized_text(token_ids, attn_mask = attn_mask, name = name)
+    encoded_text = t5_encode_tokenized_text(token_ids, attn_mask = attn_mask, name = name, return_hidden_layer_num = return_hidden_layer_num, do_final_ln = do_final_ln)
 
     if return_attn_mask:
         attn_mask = attn_mask.bool()
