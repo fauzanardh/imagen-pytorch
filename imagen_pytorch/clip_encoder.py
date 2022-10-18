@@ -19,7 +19,7 @@ def default(val, d):
 
 # config
 MAX_LENGTH = 256
-DEFAULT_CLIP_NAME = "openai/clip-vit-large-patch14"  # laion/CLIP-ViT-L-14-laion2B-s32B-b82K
+DEFAULT_CLIP_NAME = "openai/clip-vit-large-patch14"
 CLIP_CONFIGS = {}
 
 
