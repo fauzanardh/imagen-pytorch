@@ -6,31 +6,33 @@ from einops import rearrange
 
 transformers.logging.set_verbosity_error()
 
+
 def exists(val):
     return val is not None
+
 
 def default(val, d):
     if exists(val):
         return val
     return d() if callable(d) else d
 
+
 # config
-
 MAX_LENGTH = 256
-
-DEFAULT_T5_NAME = 'google/t5-v1_1-base'
-
+DEFAULT_T5_NAME = "google/t5-v1_1-base"
 T5_CONFIGS = {}
 
-# singleton globals
 
+# singleton globals
 def get_tokenizer(name):
     tokenizer = T5TokenizerFast.from_pretrained(name, model_max_length=MAX_LENGTH)
     return tokenizer
 
+
 def get_model(name):
     model = T5EncoderModel.from_pretrained(name)
     return model
+
 
 def get_model_and_tokenizer(name):
     global T5_CONFIGS
@@ -42,7 +44,8 @@ def get_model_and_tokenizer(name):
     if "tokenizer" not in T5_CONFIGS[name]:
         T5_CONFIGS[name]["tokenizer"] = get_tokenizer(name)
 
-    return T5_CONFIGS[name]['model'], T5_CONFIGS[name]['tokenizer']
+    return T5_CONFIGS[name]["model"], T5_CONFIGS[name]["tokenizer"]
+
 
 def get_encoded_dim(name):
     if name not in T5_CONFIGS:
@@ -57,12 +60,9 @@ def get_encoded_dim(name):
         assert False
     return config.d_model
 
-# encoding text
 
-def t5_tokenize(
-    texts: List[str],
-    name = DEFAULT_T5_NAME
-):
+# encoding text
+def t5_tokenize(texts: List[str], name=DEFAULT_T5_NAME):
     t5, tokenizer = get_model_and_tokenizer(name)
 
     if torch.cuda.is_available():
@@ -72,23 +72,24 @@ def t5_tokenize(
 
     encoded = tokenizer.batch_encode_plus(
         texts,
-        return_tensors = "pt",
-        padding = 'longest',
-        max_length = MAX_LENGTH,
-        truncation = True
+        return_tensors="pt",
+        padding="longest",
+        max_length=MAX_LENGTH,
+        truncation=True,
     )
 
     input_ids = encoded.input_ids.to(device)
     attn_mask = encoded.attention_mask.to(device)
     return input_ids, attn_mask
 
+
 def t5_encode_tokenized_text(
     token_ids,
-    attn_mask = None,
-    pad_id = None,
-    name = DEFAULT_T5_NAME,
-    return_hidden_layer_num = None,
-    do_final_ln = False,
+    attn_mask=None,
+    pad_id=None,
+    name=DEFAULT_T5_NAME,
+    return_hidden_layer_num=None,
+    do_final_ln=False,
 ):
     assert exists(attn_mask) or exists(pad_id)
     t5, _ = get_model_and_tokenizer(name)
@@ -98,7 +99,11 @@ def t5_encode_tokenized_text(
     t5.eval()
 
     with torch.no_grad():
-        output = t5(input_ids = token_ids, attention_mask = attn_mask, output_hidden_states=return_hidden_layer_num is not None)
+        output = t5(
+            input_ids=token_ids,
+            attention_mask=attn_mask,
+            output_hidden_states=return_hidden_layer_num is not None,
+        )
         if return_hidden_layer_num is not None:
             encoded_text = output.hidden_states[return_hidden_layer_num]
             if do_final_ln:
@@ -109,18 +114,27 @@ def t5_encode_tokenized_text(
 
     attn_mask = attn_mask.bool()
 
-    encoded_text = encoded_text.masked_fill(~rearrange(attn_mask, '... -> ... 1'), 0.) # just force all embeddings that is padding to be equal to 0.
+    encoded_text = encoded_text.masked_fill(
+        ~rearrange(attn_mask, "... -> ... 1"), 0.0
+    )  # just force all embeddings that is padding to be equal to 0.
     return encoded_text
+
 
 def t5_encode_text(
     texts: List[str],
-    name = DEFAULT_T5_NAME,
-    return_attn_mask = False,
-    return_hidden_layer_num = None,
-    do_final_ln = False,
+    name=DEFAULT_T5_NAME,
+    return_attn_mask=False,
+    return_hidden_layer_num=None,
+    do_final_ln=False,
 ):
-    token_ids, attn_mask = t5_tokenize(texts, name = name)
-    encoded_text = t5_encode_tokenized_text(token_ids, attn_mask = attn_mask, name = name, return_hidden_layer_num = return_hidden_layer_num, do_final_ln = do_final_ln)
+    token_ids, attn_mask = t5_tokenize(texts, name=name)
+    encoded_text = t5_encode_tokenized_text(
+        token_ids,
+        attn_mask=attn_mask,
+        name=name,
+        return_hidden_layer_num=return_hidden_layer_num,
+        do_final_ln=do_final_ln,
+    )
 
     if return_attn_mask:
         attn_mask = attn_mask.bool()
