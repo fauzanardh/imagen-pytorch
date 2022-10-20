@@ -48,7 +48,7 @@ class NullUnetConfig(BaseModel):
 class UnetConfig(AllowExtraBaseModel):
     dim: int
     dim_mults: ListOrTuple(int)
-    text_embed_dim: int = get_encoded_dim(DEFAULT_T5_NAME)
+    text_embed_dim: int
     cond_dim: int = 128
     channels: int = 3
     attn_dim_head: int = 32
@@ -61,7 +61,7 @@ class UnetConfig(AllowExtraBaseModel):
 class Unet3DConfig(AllowExtraBaseModel):
     dim: int
     dim_mults: ListOrTuple(int)
-    text_embed_dim: int = get_encoded_dim(DEFAULT_T5_NAME)
+    text_embed_dim: int
     cond_dim: int = 128
     channels: int = 3
     attn_dim_head: int = 32
@@ -118,7 +118,8 @@ class ElucidatedImagenConfig(AllowExtraBaseModel):
     unets: ListOrTuple(Union[UnetConfig, Unet3DConfig, NullUnetConfig])
     image_sizes: ListOrTuple(Union[int, Tuple[int, int]])
     video: bool = False
-    text_encoder_name: str = DEFAULT_T5_NAME
+    text_encoder_type: str = "t5"
+    text_encoder_name: Optional[str] = None
     channels: int = 3
     cond_drop_prob: float = 0.5
     num_sample_steps: SingleOrList(int) = 32

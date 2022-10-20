@@ -41,7 +41,8 @@ from imagen_pytorch.imagen_pytorch import (
 )
 
 from imagen_pytorch.imagen_video.imagen_video import Unet3D, resize_video_to
-from imagen_pytorch.t5_encoder import t5_encode_text, get_encoded_dim, DEFAULT_T5_NAME
+from imagen_pytorch.t5_encoder import t5_encode_text, get_encoded_dim as t5_get_encoded_dim, DEFAULT_T5_NAME
+from imagen_pytorch.clip_encoder import clip_encode_text, get_encoded_dim as clip_get_encoded_dim, DEFAULT_CLIP_NAME
 
 # constants
 Hparams_fields = [
@@ -93,7 +94,8 @@ class ElucidatedImagen(nn.Module):
         unets,
         *,
         image_sizes,  # for cascading ddpm, image size at each stage
-        text_encoder_name=DEFAULT_T5_NAME,
+        text_encoder_type="t5",
+        text_encoder_name=None,
         text_embed_dim=None,
         channels=3,
         cond_drop_prob=0.1,
@@ -146,12 +148,24 @@ class ElucidatedImagen(nn.Module):
         )
 
         # get text encoder
-        self.text_encoder_name = text_encoder_name
-        self.text_embed_dim = default(
-            text_embed_dim, lambda: get_encoded_dim(text_encoder_name)
-        )
-
-        self.encode_text = partial(t5_encode_text, name=text_encoder_name)
+        if text_encoder_type == "t5":
+            if not exists(text_encoder_name):
+                text_encoder_name = DEFAULT_T5_NAME
+            self.text_encoder_name = text_encoder_name
+            self.text_embed_dim = default(
+                text_embed_dim, lambda: t5_get_encoded_dim(text_encoder_name)
+            )
+            self.encode_text = partial(t5_encode_text, name=text_encoder_name)
+        elif text_encoder_type == "clip":
+            if not exists(text_encoder_name):
+                text_encoder_name = DEFAULT_CLIP_NAME
+            self.text_encoder_name = text_encoder_name
+            self.text_embed_dim = default(
+                text_embed_dim, lambda: clip_get_encoded_dim(text_encoder_name)
+            )
+            self.encode_text = partial(clip_encode_text, name=text_encoder_name)
+        else:
+            raise ValueError(f"invalid text_encoder_type: {text_encoder_type}")
 
         # construct unets
         self.unets = nn.ModuleList([])
