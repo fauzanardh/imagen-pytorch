@@ -1175,6 +1175,9 @@ class Unet(nn.Module):
     ):
         super().__init__()
 
+        # disable non memory efficient for now
+        assert memory_efficient, "non memory efficient not supported for current version of unet, please use memory efficient"
+
         # guide researchers
         assert (
             attn_heads > 1
@@ -1388,7 +1391,7 @@ class Unet(nn.Module):
         self.inner_conditioning = inner_conditioning
 
         # downsampling layers
-        skip_connect_dims = []  # keep track of skip connection dimensions
+        # skip_connect_dims = []  # keep track of skip connection dimensions
 
         for ind, (
             (dim_in, dim_out),
@@ -1428,8 +1431,6 @@ class Unet(nn.Module):
             if memory_efficient:
                 pre_downsample = downsample_klass(dim_in, dim_out)
                 current_dim = dim_out
-
-            skip_connect_dims.append(current_dim)
 
             # whether to do post-downsample, for non-memory efficient unet
             post_downsample = None
@@ -1549,15 +1550,13 @@ class Unet(nn.Module):
             else:
                 transformer_block_klass = Identity
 
-            skip_connect_dim = skip_connect_dims.pop()
-
             upsample_fmap_dims.append(dim_out)
 
             self.ups.append(
                 nn.ModuleList(
                     [
                         resnet_klass(
-                            dim_out + skip_connect_dim,
+                            dim_out,
                             dim_out,
                             cond_dim=layer_cond_dim,
                             linear_attn=layer_use_linear_cross_attn,
@@ -1567,7 +1566,7 @@ class Unet(nn.Module):
                         nn.ModuleList(
                             [
                                 ResnetBlock(
-                                    dim_out + skip_connect_dim,
+                                    dim_out,
                                     dim_out,
                                     cond_dim=inner_cond_dim,
                                     linear_attn=inner_use_linear,
@@ -1871,7 +1870,7 @@ class Unet(nn.Module):
         x = self.mid_block2(x, t, c)
 
         def add_skip_connection(x):
-            return torch.cat((x, hiddens.pop() * self.skip_connect_scale), dim=1)
+            return x + hiddens.pop() * self.skip_connect_scale
 
         up_hiddens = []
 
