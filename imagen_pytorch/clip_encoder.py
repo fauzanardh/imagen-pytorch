@@ -151,7 +151,7 @@ def clip_encode_text(
 def clip_encode_text_extended(
     texts: List[str],
     name=DEFAULT_CLIP_NAME,
-    return_attn_mask=False,
+    # return_attn_mask=False,
     return_hidden_layer_num=None,
     do_final_ln=False,
 ):
@@ -172,6 +172,6 @@ def clip_encode_text_extended(
         out.append(tokenized)
     encoded_text = torch.cat(out, dim=1).to(device)
 
-    if return_attn_mask:
-        return encoded_text, (token_bos_eos != EOS)
+    # if return_attn_mask:
+    #     return encoded_text, (token_bos_eos != EOS)
     return encoded_text
