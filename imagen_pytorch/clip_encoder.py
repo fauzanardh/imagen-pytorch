@@ -18,8 +18,8 @@ def default(val, d):
 
 
 # config
-MAX_LENGTH = 231
 REAL_MAX_LENGTH = 77
+MAX_LENGTH = REAL_MAX_LENGTH * 3
 BOS = 49406
 EOS = 49407
 DEFAULT_CLIP_NAME = "openai/clip-vit-large-patch14"
@@ -90,7 +90,7 @@ def clip_tokenize(texts: List[str], name=DEFAULT_CLIP_NAME):
 def clip_encode_tokenized_text(
     token_ids,
     attn_mask=None,
-    pad_id=None,
+    pad_id=EOS,
     name=DEFAULT_CLIP_NAME,
     return_hidden_layer_num=None,
     do_final_ln=False,
@@ -151,19 +151,19 @@ def clip_encode_text(
 def clip_encode_text_extended(
     texts: List[str],
     name=DEFAULT_CLIP_NAME,
-    # return_attn_mask=False,
+    return_attn_mask=False,
     return_hidden_layer_num=None,
     do_final_ln=False,
 ):
     token_ids, _ = clip_tokenize(texts, name=name)
     device = token_ids.device
-    split_token_tuples = token_ids.split(REAL_MAX_LENGTH, dim=1)
+    token_ids_split = token_ids.split(REAL_MAX_LENGTH, dim=1)
 
     out = []
-    for token_bos_eos in split_token_tuples:
-        attn_mask = (token_bos_eos != EOS).long()
+    for token_ids in token_ids_split:
+        attn_mask = torch.any(token_ids != EOS, dim=-1).long()
         tokenized = clip_encode_tokenized_text(
-            token_bos_eos,
+            token_ids,
             attn_mask=attn_mask,
             name=name,
             return_hidden_layer_num=return_hidden_layer_num,
@@ -172,6 +172,6 @@ def clip_encode_text_extended(
         out.append(tokenized)
     encoded_text = torch.cat(out, dim=1).to(device)
 
-    # if return_attn_mask:
-    #     return encoded_text, (token_bos_eos != EOS)
+    if return_attn_mask:
+        return encoded_text, torch.any(encoded_text != EOS, dim=-1)
     return encoded_text
