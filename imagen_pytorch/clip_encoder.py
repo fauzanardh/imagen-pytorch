@@ -161,7 +161,7 @@ def clip_encode_text_extended(
 
     out = []
     for token_ids in token_ids_split:
-        attn_mask = torch.any(token_ids != EOS, dim=-1).long()
+        attn_mask = (token_ids != EOS).long()
         tokenized = clip_encode_tokenized_text(
             token_ids,
             attn_mask=attn_mask,
@@ -173,5 +173,5 @@ def clip_encode_text_extended(
     encoded_text = torch.cat(out, dim=1).to(device)
 
     if return_attn_mask:
-        return encoded_text, torch.any(encoded_text != EOS, dim=-1)
+        return encoded_text, torch.any(encoded_text != 0.0, dim=-1)
     return encoded_text
