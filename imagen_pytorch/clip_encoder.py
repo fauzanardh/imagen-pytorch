@@ -157,10 +157,31 @@ def clip_encode_text_extended(
 ):
     token_ids, _ = clip_tokenize(texts, name=name)
     device = token_ids.device
-    token_ids_split = token_ids.split(REAL_MAX_LENGTH, dim=1)
+    # remove bos and eos from token_ids
+    token_ids = token_ids[:, 1:-1]
+    token_ids_split = token_ids.split(REAL_MAX_LENGTH - 2, dim=1)
 
     out = []
     for token_ids in token_ids_split:
+        # add back bos and eos
+        token_ids = torch.cat(
+            [
+                torch.full(
+                    (token_ids.shape[0], 1),
+                    BOS,
+                    dtype=torch.long,
+                    device=device,
+                ),
+                token_ids,
+                torch.full(
+                    (token_ids.shape[0], 1),
+                    EOS,
+                    dtype=torch.long,
+                    device=device,
+                ),
+            ],
+            dim=1,
+        )
         attn_mask = (token_ids != EOS).long()
         tokenized = clip_encode_tokenized_text(
             token_ids,
