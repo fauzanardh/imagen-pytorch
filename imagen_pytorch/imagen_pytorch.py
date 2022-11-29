@@ -1504,7 +1504,7 @@ class Unet(nn.Module):
             groups=resnet_groups[-1],
         )
         self.mid_attn = (
-            TransformerBlock(mid_dim, depth=layer_mid_attns_depth, **attn_kwargs)
+            TransformerBlock(mid_dim, depth=layer_mid_attns_depth, context_dim=mid_context_dim, **attn_kwargs)
             if attend_at_middle
             else None
         )
