@@ -41,8 +41,16 @@ from imagen_pytorch.imagen_pytorch import (
 )
 
 from imagen_pytorch.imagen_video.imagen_video import Unet3D, resize_video_to
-from imagen_pytorch.t5_encoder import t5_encode_text, get_encoded_dim as t5_get_encoded_dim, DEFAULT_T5_NAME
-from imagen_pytorch.clip_encoder import clip_encode_text, get_encoded_dim as clip_get_encoded_dim, DEFAULT_CLIP_NAME
+from imagen_pytorch.t5_encoder import (
+    t5_encode_text,
+    get_encoded_dim as t5_get_encoded_dim,
+    DEFAULT_T5_NAME,
+)
+from imagen_pytorch.clip_encoder import (
+    clip_encode_text,
+    get_encoded_dim as clip_get_encoded_dim,
+    DEFAULT_CLIP_NAME,
+)
 
 # constants
 Hparams_fields = [
@@ -198,7 +206,9 @@ class ElucidatedImagen(nn.Module):
 
         # unet image sizes
         self.image_sizes = cast_tuple(image_sizes)
-        assert num_unets == len(self.image_sizes), f'you did not supply the correct number of u-nets ({len(self.unets)}) for resolutions {self.image_sizes}'
+        assert num_unets == len(
+            self.image_sizes
+        ), f"you did not supply the correct number of u-nets ({len(self.unets)}) for resolutions {self.image_sizes}"
 
         self.sample_channels = cast_tuple(self.channels, num_unets)
 
@@ -746,7 +756,11 @@ class ElucidatedImagen(nn.Module):
                     lowres_cond_img = self.resize_to(img, image_size)
                     lowres_cond_img = self.normalize_img(lowres_cond_img)
 
-                    lowres_cond_img, *_ = self.lowres_noise_schedule.q_sample(x_start = lowres_cond_img, t = lowres_noise_times, noise = torch.randn_like(lowres_cond_img))
+                    lowres_cond_img, *_ = self.lowres_noise_schedule.q_sample(
+                        x_start=lowres_cond_img,
+                        t=lowres_noise_times,
+                        noise=torch.randn_like(lowres_cond_img),
+                    )
 
                 if exists(unet_init_images):
                     unet_init_images = self.resize_to(unet_init_images, image_size)
@@ -944,7 +958,11 @@ class ElucidatedImagen(nn.Module):
         # at sample time, they then fix the noise level of 0.1 - 0.3
         lowres_cond_img_noisy = None
         if exists(lowres_cond_img):
-            lowres_cond_img_noisy, *_ = self.lowres_noise_schedule.q_sample(x_start = lowres_cond_img, t = lowres_aug_times, noise = torch.randn_like(lowres_cond_img))
+            lowres_cond_img_noisy, *_ = self.lowres_noise_schedule.q_sample(
+                x_start=lowres_cond_img,
+                t=lowres_aug_times,
+                noise=torch.randn_like(lowres_cond_img),
+            )
 
         # get the sigmas
         sigmas = self.noise_distribution(hp.P_mean, hp.P_std, batch_size)

@@ -32,8 +32,8 @@ def convert_image_to(img_type, image):
         return image.convert(img_type)
     return image
 
-# dataset, dataloader, collator
 
+# dataset, dataloader, collator
 class Collator:
     def __init__(self, image_size, url_label, text_label, image_label, name, channels):
         self.url_label = url_label
@@ -42,11 +42,14 @@ class Collator:
         self.download = url_label is not None
         self.name = name
         self.channels = channels
-        self.transform = T.Compose([
-            T.Resize(image_size),
-            T.CenterCrop(image_size),
-            T.ToTensor(),
-        ])
+        self.transform = T.Compose(
+            [
+                T.Resize(image_size),
+                T.CenterCrop(image_size),
+                T.ToTensor(),
+            ]
+        )
+
     def __call__(self, batch):
 
         texts = []
@@ -67,7 +70,7 @@ class Collator:
 
         if len(texts) == 0:
             return None
-        
+
         texts = pad_sequence(texts, True)
 
         newbatch = []
@@ -84,10 +87,11 @@ class Collator:
                 headers={"user-agent": USER_AGENT},
             )
             with urllib.request.urlopen(request, timeout=timeout) as req:
-                image = Image.open(io.BytesIO(req.read())).convert('RGB')
+                image = Image.open(io.BytesIO(req.read())).convert("RGB")
         except Exception:
             image = None
         return image
+
 
 class Dataset(Dataset):
     def __init__(

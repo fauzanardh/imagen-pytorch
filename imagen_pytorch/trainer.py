@@ -524,11 +524,12 @@ class ImagenTrainer(nn.Module):
     # computed values
 
     def prepare(self):
-        assert not self.prepared, f'The trainer is allready prepared'
+        assert not self.prepared, "The trainer is allready prepared"
         self.validate_and_set_unet_being_trained(self.only_train_unet_number)
         self.prepared = True
+
     # computed values
-    
+
     @property
     def device(self):
         return self.accelerator.device
@@ -594,9 +595,15 @@ class ImagenTrainer(nn.Module):
         scheduler = getattr(self, f"scheduler{unet_index}")
 
         if self.train_dl:
-            self.unet_being_trained, self.train_dl, optimizer = self.accelerator.prepare(unet, self.train_dl, optimizer)
+            (
+                self.unet_being_trained,
+                self.train_dl,
+                optimizer,
+            ) = self.accelerator.prepare(unet, self.train_dl, optimizer)
         else:
-            self.unet_being_trained, optimizer = self.accelerator.prepare(unet, optimizer)
+            self.unet_being_trained, optimizer = self.accelerator.prepare(
+                unet, optimizer
+            )
 
         if exists(scheduler):
             scheduler = self.accelerator.prepare(scheduler)
@@ -664,16 +671,16 @@ class ImagenTrainer(nn.Module):
         if not exists(dl):
             return
 
-        assert not exists(self.train_dl), 'training dataloader was already added'
-        assert not self.prepared, f'You need to add the dataset before preperation'
+        assert not exists(self.train_dl), "training dataloader was already added"
+        assert not self.prepared, "You need to add the dataset before preperation"
         self.train_dl = dl
 
     def add_valid_dataloader(self, dl):
         if not exists(dl):
             return
 
-        assert not exists(self.valid_dl), 'validation dataloader was already added'
-        assert not self.prepared, f'You need to add the dataset before preperation'
+        assert not exists(self.valid_dl), "validation dataloader was already added"
+        assert not self.prepared, "You need to add the dataset before preperation"
         self.valid_dl = dl
 
     def add_train_dataset(self, ds=None, *, batch_size, **dl_kwargs):
@@ -696,7 +703,7 @@ class ImagenTrainer(nn.Module):
                 f"training with dataset of {len(ds)} samples and validating with randomly splitted {len(valid_ds)} samples"
             )
 
-        dl = DataLoader(ds, batch_size = batch_size, **dl_kwargs)
+        dl = DataLoader(ds, batch_size=batch_size, **dl_kwargs)
         self.add_train_dataloader(dl)
 
         if not self.split_valid_from_train:
@@ -710,7 +717,7 @@ class ImagenTrainer(nn.Module):
 
         assert not exists(self.valid_dl), "validation dataloader was already added"
 
-        dl = DataLoader(ds, batch_size = batch_size, **dl_kwargs)
+        dl = DataLoader(ds, batch_size=batch_size, **dl_kwargs)
         self.add_valid_dataloader(dl)
 
     def create_train_iter(self):
@@ -733,7 +740,7 @@ class ImagenTrainer(nn.Module):
 
         self.valid_dl_iter = cycle(self.valid_dl)
 
-    def train_step(self, unet_number = None, **kwargs):
+    def train_step(self, unet_number=None, **kwargs):
         if not self.prepared:
             self.prepare()
         self.create_train_iter()
@@ -749,7 +756,9 @@ class ImagenTrainer(nn.Module):
         if not self.prepared:
             self.prepare()
         self.create_valid_iter()
-        context = self.use_ema_unets if kwargs.pop('use_ema_unets', False) else nullcontext
+        context = (
+            self.use_ema_unets if kwargs.pop("use_ema_unets", False) else nullcontext
+        )
         with context():
             loss = self.step_with_dl_iter(self.valid_dl_iter, **kwargs)
         return loss

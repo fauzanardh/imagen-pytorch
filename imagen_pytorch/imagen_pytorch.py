@@ -19,7 +19,7 @@ import kornia.augmentation as K
 from resize_right import resize, interp_methods
 
 from einops import rearrange, repeat, reduce, pack, unpack
-from einops.layers.torch import Rearrange, Reduce
+from einops.layers.torch import Rearrange
 from einops_exts import rearrange_many, repeat_many, check_shape
 
 from imagen_pytorch.t5_encoder import t5_encode_text, get_encoded_dim, DEFAULT_T5_NAME
@@ -245,7 +245,7 @@ class GaussianDiffusionContinuousTimes(nn.Module):
         )
 
     def sample_random_times(self, batch_size, *, device):
-        return torch.zeros((batch_size,), device = device).float().uniform_(0, 1)
+        return torch.zeros((batch_size,), device=device).float().uniform_(0, 1)
 
     def get_condition(self, times):
         return maybe(self.log_snr)(times)
@@ -720,9 +720,7 @@ class ResnetBlock(nn.Module):
             attn_klass = CrossAttention if not linear_attn else LinearCrossAttention
 
             self.cross_attn = attn_klass(
-                dim = dim_out,
-                context_dim = cond_dim,
-                **attn_kwargs
+                dim=dim_out, context_dim=cond_dim, **attn_kwargs
             )
 
         self.block1 = Block(dim, dim_out, groups=groups)
@@ -746,11 +744,11 @@ class ResnetBlock(nn.Module):
 
         if exists(self.cross_attn):
             assert exists(cond)
-            h = rearrange(h, 'b c h w -> b h w c')
-            h, ps = pack([h], 'b * c')
-            h = self.cross_attn(h, context = cond) + h
-            h, = unpack(h, ps, 'b * c')
-            h = rearrange(h, 'b h w c -> b c h w')
+            h = rearrange(h, "b c h w -> b h w c")
+            h, ps = pack([h], "b * c")
+            h = self.cross_attn(h, context=cond) + h
+            (h,) = unpack(h, ps, "b * c")
+            h = rearrange(h, "b h w c -> b c h w")
 
         h = self.block2(h, scale_shift=scale_shift)
 
@@ -1007,21 +1005,31 @@ class TransformerBlock(nn.Module):
         self.layers = nn.ModuleList([])
 
         for _ in range(depth):
-            self.layers.append(nn.ModuleList([
-                Attention(dim = dim, heads = heads, dim_head = dim_head, context_dim = context_dim, cosine_sim_attn = cosine_sim_attn),
-                FeedForward(dim = dim, mult = ff_mult)
-            ]))
+            self.layers.append(
+                nn.ModuleList(
+                    [
+                        Attention(
+                            dim=dim,
+                            heads=heads,
+                            dim_head=dim_head,
+                            context_dim=context_dim,
+                            cosine_sim_attn=cosine_sim_attn,
+                        ),
+                        FeedForward(dim=dim, mult=ff_mult),
+                    ]
+                )
+            )
 
-    def forward(self, x, context = None):
-        x = rearrange(x, 'b c h w -> b h w c')
-        x, ps = pack([x], 'b * c')
+    def forward(self, x, context=None):
+        x = rearrange(x, "b c h w -> b h w c")
+        x, ps = pack([x], "b * c")
 
         for attn, ff in self.layers:
             x = attn(x, context=context) + x
             x = ff(x) + x
 
-        x, = unpack(x, ps, 'b * c')
-        x = rearrange(x, 'b h w c -> b c h w')
+        (x,) = unpack(x, ps, "b * c")
+        x = rearrange(x, "b h w c -> b c h w")
         return x
 
 
@@ -1145,7 +1153,7 @@ class Unet(nn.Module):
         lowres_cond=False,  # for cascading diffusion - https://cascaded-diffusion.github.io/
         layer_attns=True,
         layer_attns_depth=1,
-        layer_mid_attns_depth = 1,
+        layer_mid_attns_depth=1,
         layer_attns_add_text_cond=True,  # whether to condition the self-attention blocks with the text embeddings, as described in Appendix D.3.1
         attend_at_middle=True,  # whether to have a layer of attention at the bottleneck (can turn off for higher resolution in cascading DDPM, before bringing in efficient attention)
         layer_cross_attns=True,
@@ -1488,9 +1496,25 @@ class Unet(nn.Module):
         mid_dim = dims[-1]
         mid_context_dim = cond_dim if self.inner_conditioning else None
 
-        self.mid_block1 = ResnetBlock(mid_dim, mid_dim, cond_dim = cond_dim, time_cond_dim = time_cond_dim, groups = resnet_groups[-1])
-        self.mid_attn = TransformerBlock(mid_dim, depth = layer_mid_attns_depth, **attn_kwargs) if attend_at_middle else None
-        self.mid_block2 = ResnetBlock(mid_dim, mid_dim, cond_dim = cond_dim, time_cond_dim = time_cond_dim, groups = resnet_groups[-1])
+        self.mid_block1 = ResnetBlock(
+            mid_dim,
+            mid_dim,
+            cond_dim=cond_dim,
+            time_cond_dim=time_cond_dim,
+            groups=resnet_groups[-1],
+        )
+        self.mid_attn = (
+            TransformerBlock(mid_dim, depth=layer_mid_attns_depth, **attn_kwargs)
+            if attend_at_middle
+            else None
+        )
+        self.mid_block2 = ResnetBlock(
+            mid_dim,
+            mid_dim,
+            cond_dim=cond_dim,
+            time_cond_dim=time_cond_dim,
+            groups=resnet_groups[-1],
+        )
 
         # upsample klass
         upsample_klass = (
@@ -2224,8 +2248,8 @@ class Imagen(nn.Module):
             x_start = noise_scheduler.predict_start_from_noise(x, t=t, noise=pred)
         elif pred_objective == "x_start":
             x_start = pred
-        elif pred_objective == 'v':
-            x_start = noise_scheduler.predict_start_from_v(x, t = t, v = pred)
+        elif pred_objective == "v":
+            x_start = noise_scheduler.predict_start_from_v(x, t=t, v=pred)
         else:
             raise ValueError(f"unknown objective {pred_objective}")
 
@@ -2362,7 +2386,9 @@ class Imagen(nn.Module):
                 is_last_resample_step = r == 0
 
                 if has_inpainting:
-                    noised_inpaint_images, *_ = noise_scheduler.q_sample(inpaint_images, t = times)
+                    noised_inpaint_images, *_ = noise_scheduler.q_sample(
+                        inpaint_images, t=times
+                    )
                     img = img * ~inpaint_masks + noised_inpaint_images * inpaint_masks
 
                 self_cond = x_start if unet.self_cond else None
@@ -2579,7 +2605,11 @@ class Imagen(nn.Module):
                     lowres_cond_img = self.resize_to(img, image_size)
 
                     lowres_cond_img = self.normalize_img(lowres_cond_img)
-                    lowres_cond_img, *_ = self.lowres_noise_schedule.q_sample(x_start = lowres_cond_img, t = lowres_noise_times, noise = torch.randn_like(lowres_cond_img))
+                    lowres_cond_img, *_ = self.lowres_noise_schedule.q_sample(
+                        x_start=lowres_cond_img,
+                        t=lowres_noise_times,
+                        noise=torch.randn_like(lowres_cond_img),
+                    )
 
                 if exists(unet_init_images):
                     unet_init_images = self.resize_to(unet_init_images, image_size)
@@ -2688,14 +2718,20 @@ class Imagen(nn.Module):
             x_start=x_start, t=times, noise=noise
         )
 
-        x_noisy, log_snr, alpha, sigma = noise_scheduler.q_sample(x_start = x_start, t = times, noise = noise)
+        x_noisy, log_snr, alpha, sigma = noise_scheduler.q_sample(
+            x_start=x_start, t=times, noise=noise
+        )
 
         # also noise the lowres conditioning image
         # at sample time, they then fix the noise level of 0.1 - 0.3
         lowres_cond_img_noisy = None
         if exists(lowres_cond_img):
             lowres_aug_times = default(lowres_aug_times, times)
-            lowres_cond_img_noisy, *_ = self.lowres_noise_schedule.q_sample(x_start = lowres_cond_img, t = lowres_aug_times, noise = torch.randn_like(lowres_cond_img))
+            lowres_cond_img_noisy, *_ = self.lowres_noise_schedule.q_sample(
+                x_start=lowres_cond_img,
+                t=lowres_aug_times,
+                noise=torch.randn_like(lowres_cond_img),
+            )
 
         # time condition
         noise_cond = noise_scheduler.get_condition(times)
@@ -2716,7 +2752,11 @@ class Imagen(nn.Module):
         # Because 'unet' can be an instance of DistributedDataParallel coming from the
         # ImagenTrainer.unet_being_trained when invoking ImagenTrainer.forward(), we need to
         # access the member 'module' of the wrapped unet instance.
-        self_cond = unet.module.self_cond if isinstance(unet, DistributedDataParallel) else unet.self_cond
+        self_cond = (
+            unet.module.self_cond
+            if isinstance(unet, DistributedDataParallel)
+            else unet.self_cond
+        )
 
         if self_cond and random() < 0.5:
             with torch.no_grad():
@@ -2740,7 +2780,7 @@ class Imagen(nn.Module):
             target = noise
         elif pred_objective == "x_start":
             target = x_start
-        elif pred_objective == 'v':
+        elif pred_objective == "v":
             # derivation detailed in Appendix D of Progressive Distillation paper
             # https://arxiv.org/abs/2202.00512
             # this makes distillation viable as well as solve an issue with color shifting in upresoluting unets, noted in imagen-video
