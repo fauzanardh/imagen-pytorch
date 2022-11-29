@@ -18,6 +18,8 @@ Please join <a href="https://discord.gg/xBPBXfcFHd"><img alt="Join us on Discord
 
 - <a href="https://huggingface.co/">🤗 Huggingface</a> for their amazing transformers library. The text encoder portion is pretty much taken care of because of them
 
+- <a href="http://www.jonathanho.me/">Jonathan Ho</a> for bringing about a revolution in generative artificial intelligence through <a href="https://arxiv.org/abs/2006.11239">his seminal paper</a>
+
 - <a href="https://github.com/sgugger">Sylvain</a> and <a href="https://github.com/muellerzr">Zachary</a> for the <a href="https://github.com/huggingface/accelerate">Accelerate</a> library, which this repository uses for distributed training
 
 - <a href="https://github.com/arogozhnikov">Alex</a> for <a href="https://github.com/arogozhnikov/einops">einops</a>, indispensable tool for tensor manipulation
@@ -39,6 +41,8 @@ Please join <a href="https://discord.gg/xBPBXfcFHd"><img alt="Join us on Discord
 - <a href="https://github.com/BIGJUN777">BIGJUN</a> for catching a big bug with continuous time gaussian diffusion noise level conditioning at inference time
 
 - <a href="https://github.com/animebing">Bingbing</a> for identifying a bug with sampling and order of normalizing and noising with low resolution conditioning image
+
+- <a href="https://github.com/TheFusion21">Kay</a> for contributing one line command training of Imagen!
 
 ## Install
 
@@ -389,16 +393,69 @@ That's it!
 
 ## Command-line
 
-To further democratize the use of this machine imagination, I have built in the ability to generate an image with any text prompt using one command line as so
+Imagen can also be used via CLI directly.
+
+### Configuration
 
 ex.
 
 ```bash
-$ imagen --model ./path/to/model/checkpoint.pt "a squirrel raiding the birdfeeder"
+$ imagen config
+```
+or
+```bash
+$ imagen config --path ./configs/config.json
+```
+
+In the config you are able to change settings for the trainer, dataset and the imagen config.
+
+The Imagen config parameters can be found <a href="https://github.com/lucidrains/imagen-pytorch/blob/f8cc75f4d9020998c577b3770d3f260ce2ee2dcf/imagen_pytorch/configs.py#L68">here</a>
+
+The Elucidated Imagen config parameters can be found <a href="https://github.com/lucidrains/imagen-pytorch/blob/f8cc75f4d9020998c577b3770d3f260ce2ee2dcf/imagen_pytorch/configs.py#L108">here</a>
+
+The Imagen Trainer config parameters can be found <a href="https://github.com/lucidrains/imagen-pytorch/blob/f8cc75f4d9020998c577b3770d3f260ce2ee2dcf/imagen_pytorch/trainer.py#L226">here</a>
+
+For the dataset parameters all dataloader parameters can be used.
+
+### Training
+
+This command allows you to train or resume training your model
+
+ex.
+```bash
+$ imagen train
+```
+or
+```bash
+$ imagen train --unet 2 --epoches 10000 --valid 100
+```
+
+You can pass following arguments to the training command.
+
+- `--config` specify the config file to use for training [default: ./imagen_config.json]
+- `--unet` the index of the unet to train [default: 1]
+- `--epoches` how many epoches to train for [default: 1000]
+- `--text` specify the text to samples with for every 100 epoches
+- `--valid` enable validation and optionally specify how many epoches between each validation [default: false]
+
+### Sampling
+
+Be aware when sampling your checkpoint should have trained all unets to get a usable result.
+
+ex.
+
+```bash
+$ imagen sample --model ./path/to/model/checkpoint.pt "a squirrel raiding the birdfeeder"
 # image is saved to ./a_squirrel_raiding_the_birdfeeder.png
 ```
 
-In order to save checkpoints that can make use of this feature, you must instantiate your Imagen instance using the config classes, `ImagenConfig` and `ElucidatedImagenConfig`
+You can pass following arguments to the sample command.
+
+- `--model` specify the model file to use for sampling
+- `--cond_scale` conditioning scale (classifier free guidance) in decoder
+- `--load_ema` load EMA version of unets if available
+
+In order to use a saved checkpoint with this feature, you either must instantiate your Imagen instance using the config classes, `ImagenConfig` and `ElucidatedImagenConfig` or create a checkpoint via the CLI directly
 
 For proper training, you'll likely want to setup config-driven training anyways.
 
@@ -628,6 +685,7 @@ Anything! It is MIT licensed. In other words, you can freely copy / paste for yo
 - [x] move video frames to sample function, as we will be attempting time extrapolation
 - [x] attention bias to null key / values should be a learned scalar of head dimension
 - [x] add self-conditioning from <a href="https://arxiv.org/abs/2208.04202">bit diffusion</a> paper, already coded up at <a href="https://github.com/lucidrains/denoising-diffusion-pytorch/commit/beb2f2d8dd9b4f2bd5be4719f37082fe061ee450">ddpm-pytorch</a>
+- [x] add v-parameterization (https://arxiv.org/abs/2202.00512) from <a href="https://imagen.research.google/video/paper.pdf">imagen video</a> paper, the only thing new
 - [ ] reread <a href="https://arxiv.org/abs/2205.15868">cogvideo</a> and figure out how frame rate conditioning could be used
 - [ ] bring in attention expertise for self attention layers in unet3d
 - [ ] consider bringing in NUWA's 3d convolutional attention
@@ -637,7 +695,7 @@ Anything! It is MIT licensed. In other words, you can freely copy / paste for yo
 - [ ] investigate frank wood's claims https://github.com/lucidrains/flexible-diffusion-modeling-videos-pytorch and either add the hierarchical sampling technique, or let people know about its deficiencies
 - [ ] make sure inpainting works with video
 - [ ] offer challenging moving mnist (with distractor objects) as a one-line trainable baseline for researchers to branch off of for text to video
-- [ ] build out CLI tool for training, resuming training off config file
+- [x] build out CLI tool for training, resuming training off config file
 - [ ] preencoding of text to memmapped embeddings
 - [ ] be able to create dataloader iterators based on the old epoch style, also configure shuffling etc
 - [ ] be able to also pass in arguments (instead of requiring forward to be all keyword args on model)
@@ -648,6 +706,8 @@ Anything! It is MIT licensed. In other words, you can freely copy / paste for yo
 - [ ] accommodate <a href="https://dreambooth.github.io/">dream booth</a> fine tuning
 - [ ] add textual inversion
 - [ ] cleanup self conditioning to be extracted at imagen instantiation
+- [ ] incorporate all learnings from make-a-video (https://makeavideo.studio/)
+- [ ] make sure eventual dreambooth works with imagen-video
 
 ## Citations
 
@@ -773,11 +833,38 @@ Anything! It is MIT licensed. In other words, you can freely copy / paste for yo
 ```
 
 ```bibtex
+@misc{Singer2022,
+    author  = {Uriel Singer},
+    url     = {https://makeavideo.studio/Make-A-Video.pdf}
+}
+```
+
+```bibtex
 @article{Sunkara2022NoMS,
     title   = {No More Strided Convolutions or Pooling: A New CNN Building Block for Low-Resolution Images and Small Objects},
     author  = {Raja Sunkara and Tie Luo},
     journal = {ArXiv},
     year    = {2022},
     volume  = {abs/2208.03641}
+}
+```
+
+```bibtex
+@article{Salimans2022ProgressiveDF,
+    title   = {Progressive Distillation for Fast Sampling of Diffusion Models},
+    author  = {Tim Salimans and Jonathan Ho},
+    journal = {ArXiv},
+    year    = {2022},
+    volume  = {abs/2202.00512}
+}
+```
+
+```bibtex
+@article{Ho2022ImagenVH,
+    title   = {Imagen Video: High Definition Video Generation with Diffusion Models},
+    author  = {Jonathan Ho and William Chan and Chitwan Saharia and Jay Whang and Ruiqi Gao and Alexey A. Gritsenko and Diederik P. Kingma and Ben Poole and Mohammad Norouzi and David J. Fleet and Tim Salimans},
+    journal = {ArXiv},
+    year    = {2022},
+    volume  = {abs/2210.02303}
 }
 ```
