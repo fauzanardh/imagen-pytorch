@@ -1,11 +1,11 @@
 from pathlib import Path
 from functools import partial
 
+import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms as T, utils
-import torch.nn.functional as F
-from imagen_pytorch import t5
+from torchvision import transforms as T
+from imagen_pytorch.t5_encoder import t5_encode_text
 from torch.nn.utils.rnn import pad_sequence
 
 from PIL import Image
@@ -61,7 +61,7 @@ class Collator:
             except:
                 continue
 
-            text = t5.t5_encode_text([item[self.text_label]], name=self.name)
+            text = t5_encode_text([item[self.text_label]], name=self.name)
             texts.append(torch.squeeze(text))
             images.append(image)
 
@@ -130,7 +130,7 @@ class Dataset(Dataset):
 def get_images_dataloader(
     folder, *, batch_size, image_size, shuffle=True, cycle_dl=False, pin_memory=True
 ):
-    ds = ImagenDataset(folder, image_size)
+    ds = Dataset(folder, image_size)
     dl = DataLoader(ds, batch_size=batch_size, shuffle=shuffle, pin_memory=pin_memory)
 
     if cycle_dl:
