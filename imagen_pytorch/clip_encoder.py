@@ -1,3 +1,4 @@
+import math
 import torch
 import transformers
 from typing import List
@@ -18,17 +19,14 @@ def default(val, d):
 
 
 # config
-REAL_MAX_LENGTH = 77
-MAX_LENGTH = REAL_MAX_LENGTH * 3
-BOS = 49406
-EOS = 49407
+MAX_LENGTH = 77
 DEFAULT_CLIP_NAME = "openai/clip-vit-large-patch14"
 CLIP_CONFIGS = {}
 
 
 # singleton globals
 def get_tokenizer(name):
-    tokenizer = CLIPTokenizerFast.from_pretrained(name, model_max_length=MAX_LENGTH)
+    tokenizer = CLIPTokenizerFast.from_pretrained(name)
     return tokenizer
 
 
@@ -78,8 +76,8 @@ def clip_tokenize(texts: List[str], name=DEFAULT_CLIP_NAME):
         texts,
         return_tensors="pt",
         padding="longest",
-        max_length=MAX_LENGTH,
-        truncation=True,
+        truncation=False,
+        add_special_tokens=False,
     )
 
     input_ids = encoded.input_ids.to(device)
@@ -90,18 +88,17 @@ def clip_tokenize(texts: List[str], name=DEFAULT_CLIP_NAME):
 def clip_encode_tokenized_text(
     token_ids,
     attn_mask=None,
-    pad_id=EOS,
+    # pad_id=EOS,
     name=DEFAULT_CLIP_NAME,
     return_hidden_layer_num=None,
     do_final_ln=False,
 ):
-    assert exists(attn_mask) or exists(pad_id)
-    clip, _ = get_model_and_tokenizer(name)
+    clip, tokenizer = get_model_and_tokenizer(name)
 
-    attn_mask = default(attn_mask, lambda: (token_ids != pad_id).long())
+    assert exists(attn_mask) or exists(tokenizer.eos_token_id)
+    attn_mask = default(attn_mask, lambda: (token_ids != tokenizer.eos_token_id).long())
 
     clip.eval()
-
     with torch.no_grad():
         output = clip(
             input_ids=token_ids,
@@ -155,44 +152,77 @@ def clip_encode_text_extended(
     return_hidden_layer_num=None,
     do_final_ln=False,
 ):
+    _, tokenizer = get_model_and_tokenizer(name)
+
+    # tokens
+    comma_token_id = [
+        token_id
+        for token, token_id in tokenizer.get_vocab().items()
+        if token == ",</w>"
+    ][0]
+
     token_ids, _ = clip_tokenize(texts, name=name)
     device = token_ids.device
-    # remove bos and eos from token_ids
-    token_ids = token_ids[:, 1:-1]
-    token_ids_split = token_ids.split(REAL_MAX_LENGTH - 2, dim=1)
 
-    out = []
-    for token_ids in token_ids_split:
-        # add back bos and eos
-        token_ids = torch.cat(
-            [
-                torch.full(
-                    (token_ids.shape[0], 1),
-                    BOS,
-                    dtype=torch.long,
-                    device=device,
-                ),
-                token_ids,
-                torch.full(
-                    (token_ids.shape[0], 1),
-                    EOS,
-                    dtype=torch.long,
-                    device=device,
-                ),
-            ],
-            dim=1,
+    remade_tokens_batch: List[List[int]] = []
+    for i in range(token_ids.size(0)):
+        remade_tokens: List[int] = []
+        last_comma = -1
+        for token_id in token_ids[i]:
+            if token_id == comma_token_id:
+                last_comma = len(remade_tokens)
+            elif (
+                max(len(remade_tokens), 1) % (MAX_LENGTH - 2) == 0 and last_comma != -1
+            ):
+                last_comma += 1
+                relocate_tokens = remade_tokens[last_comma:]
+                remade_tokens = remade_tokens[:last_comma]
+                length = len(remade_tokens)
+                remaining = (
+                    int(math.ceil(length / (MAX_LENGTH - 2))) * (MAX_LENGTH - 2)
+                    - length
+                )
+                remade_tokens += [tokenizer.eos_token_id] * remaining + relocate_tokens
+
+            remade_tokens.append(token_id)
+
+        token_count = len(remade_tokens)
+        prompt_target_count = math.ceil(max(token_count, 1) / (MAX_LENGTH - 2)) * (
+            MAX_LENGTH - 2
         )
-        attn_mask = (token_ids != EOS).long()
-        tokenized = clip_encode_tokenized_text(
-            token_ids,
+        remade_tokens += [tokenizer.eos_token_id] * (prompt_target_count - token_count)
+        remade_tokens_batch.append(remade_tokens)
+
+    out = None
+    i = 0
+    while max(map(len, remade_tokens_batch)) != 0:
+        remaining_tokens_batch = [x[(MAX_LENGTH - 2) :] for x in remade_tokens_batch]
+
+        tokens_ids = []
+        for j in range(len(remade_tokens_batch)):
+            if len(remade_tokens_batch[j]) > 0:
+                tokens_ids.append(remade_tokens_batch[j][: MAX_LENGTH - 2])
+            else:
+                tokens_ids.append([tokenizer.eos_token_id] * (MAX_LENGTH - 2))
+        tokens_tensor = torch.tensor(tokens_ids, device=device)
+        attn_mask = (tokens_tensor != tokenizer.eos_token_id).long()
+
+        encoded_text = clip_encode_tokenized_text(
+            tokens_tensor,
             attn_mask=attn_mask,
             name=name,
             return_hidden_layer_num=return_hidden_layer_num,
             do_final_ln=do_final_ln,
         )
-        out.append(tokenized)
-    encoded_text = torch.cat(out, dim=1).to(device)
+
+        if out is None:
+            out = encoded_text
+        else:
+            out = torch.cat([out, encoded_text], dim=1)
+
+        remade_tokens_batch = remaining_tokens_batch
+        i += 1
 
     if return_attn_mask:
-        return encoded_text, torch.any(encoded_text != 0.0, dim=-1)
-    return encoded_text
+        return out, torch.any(out != 0.0, dim=-1)  # type: ignore
+    return out
