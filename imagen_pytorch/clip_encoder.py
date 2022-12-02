@@ -152,7 +152,7 @@ def clip_encode_text_extended(
     return_hidden_layer_num=None,
     do_final_ln=False,
 ):
-    _, tokenizer = get_model_and_tokenizer(name)
+    tokenizer = get_tokenizer(name)
 
     # tokens
     comma_token_id = [
@@ -193,8 +193,7 @@ def clip_encode_text_extended(
         remade_tokens += [tokenizer.eos_token_id] * (prompt_target_count - token_count)
         remade_tokens_batch.append(remade_tokens)
 
-    out = None
-    i = 0
+    out = []
     while max(map(len, remade_tokens_batch)) != 0:
         remaining_tokens_batch = [x[(MAX_LENGTH - 2) :] for x in remade_tokens_batch]
 
@@ -215,14 +214,11 @@ def clip_encode_text_extended(
             do_final_ln=do_final_ln,
         )
 
-        if out is None:
-            out = encoded_text
-        else:
-            out = torch.cat([out, encoded_text], dim=1)
-
+        out.append(encoded_text)
         remade_tokens_batch = remaining_tokens_batch
-        i += 1
+
+    encoded_texts = torch.cat(out, dim=1)
 
     if return_attn_mask:
-        return out, torch.any(out != 0.0, dim=-1)  # type: ignore
-    return out
+        return encoded_texts, torch.any(encoded_texts != 0.0, dim=-1)  # type: ignore
+    return encoded_texts
