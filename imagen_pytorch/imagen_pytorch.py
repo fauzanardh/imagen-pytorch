@@ -14,7 +14,6 @@ from torch import nn, einsum
 from torch.cuda.amp import autocast
 from torch.special import expm1
 import torchvision.transforms as T
-from xformers.ops import memory_efficient_attention
 
 import kornia.augmentation as K
 from resize_right import resize, interp_methods
@@ -768,13 +767,8 @@ class CrossAttention(nn.Module):
         heads=8,
         norm_context=False,
         cosine_sim_attn=False,
-        use_flash_attn=False,
     ):
         super().__init__()
-        self.use_flash_attn = use_flash_attn
-        assert not (
-            cosine_sim_attn and use_flash_attn
-        ), "cosine sim attn not supported for flash attention yet"
         self.scale = dim_head**-0.5 if not cosine_sim_attn else 1.0
         self.cosine_sim_attn = cosine_sim_attn
         self.cosine_sim_scale = 16 if cosine_sim_attn else 1
@@ -795,7 +789,7 @@ class CrossAttention(nn.Module):
             nn.Linear(inner_dim, dim, bias=False), LayerNorm(dim)
         )
 
-    def vanilla_forward(self, x, context, mask=None):
+    def forward(self, x, context, mask=None):
         b = x.shape[0]
 
         x = self.norm(x)
@@ -837,37 +831,9 @@ class CrossAttention(nn.Module):
         out = rearrange(out, "b h n d -> b n (h d)")
         return self.to_out(out)
 
-    def flash_forward(self, x, context, mask=None):
-        b = x.shape[0]
-
-        x = self.norm(x)
-        context = self.norm_context(context)
-
-        q, k, v = (self.to_q(x), *self.to_kv(context).chunk(2, dim=-1))
-
-        q, k, v = rearrange_many((q, k, v), "b n (h d) -> b n h d", h=self.heads)
-
-        # add null key / value for classifier free guidance in prior net
-        nk, nv = repeat_many(
-            self.null_kv.unbind(dim=-2), "d -> b 1 h d", h=self.heads, b=b
-        )
-
-        k = torch.cat((nk, k), dim=-3)
-        v = torch.cat((nv, v), dim=-3)
-
-        out = memory_efficient_attention(q, k, v, scale=self.scale)
-        out = rearrange(out, "b n h d ->  b n (h d)", h=self.heads)
-        return self.to_out(out)
-
-    def forward(self, x, context, mask=None):
-        if self.use_flash_attn:
-            return self.flash_forward(x, context, mask)
-        else:
-            return self.vanilla_forward(x, context, mask)
-
 
 class LinearCrossAttention(CrossAttention):
-    def vanilla_forward(self, x, context, mask=None):
+    def forward(self, x, context, mask=None):
         b = x.shape[0]
 
         x = self.norm(x)
@@ -904,12 +870,6 @@ class LinearCrossAttention(CrossAttention):
         out = einsum("b n d, b d e -> b n e", q, context)
         out = rearrange(out, "(b h) n d -> b n (h d)", h=self.heads)
         return self.to_out(out)
-
-    def forward(self, x, context, mask=None):
-        if self.use_flash_attn:
-            return self.flash_forward(x, context, mask)
-        else:
-            return self.vanilla_forward(x, context, mask)
 
 
 class LinearAttention(nn.Module):
@@ -1040,7 +1000,6 @@ class TransformerBlock(nn.Module):
         ff_mult=2,
         context_dim=None,
         cosine_sim_attn=False,
-        use_flash_attn=False,
     ):
         super().__init__()
         self.layers = nn.ModuleList([])
@@ -1224,7 +1183,6 @@ class Unet(nn.Module):
         pixel_shuffle_upsample=True,  # may address checkboard artifacts
         inner_conditioning=False,
         allow_identity_for_text_to_cond=False,
-        use_flash_attn=False,
     ):
         super().__init__()
 
@@ -1370,10 +1328,7 @@ class Unet(nn.Module):
 
         # attention related params
         attn_kwargs = dict(
-            heads=attn_heads,
-            dim_head=attn_dim_head,
-            cosine_sim_attn=cosine_sim_attn,
-            use_flash_attn=use_flash_attn,
+            heads=attn_heads, dim_head=attn_dim_head, cosine_sim_attn=cosine_sim_attn
         )
 
         num_layers = len(in_out)
@@ -1521,7 +1476,6 @@ class Unet(nn.Module):
                                     time_cond_dim=time_cond_dim,
                                     groups=groups,
                                     use_gca=use_global_context_attn,
-                                    use_flash_attn=use_flash_attn,
                                 )
                                 for _ in range(layer_num_resnet_blocks)
                             ]
@@ -1548,15 +1502,9 @@ class Unet(nn.Module):
             cond_dim=cond_dim,
             time_cond_dim=time_cond_dim,
             groups=resnet_groups[-1],
-            use_flash_attn=use_flash_attn,
         )
         self.mid_attn = (
-            TransformerBlock(
-                mid_dim,
-                depth=layer_mid_attns_depth,
-                context_dim=mid_context_dim,
-                **attn_kwargs,
-            )
+            TransformerBlock(mid_dim, depth=layer_mid_attns_depth, context_dim=mid_context_dim, **attn_kwargs)
             if attend_at_middle
             else None
         )
@@ -1566,7 +1514,6 @@ class Unet(nn.Module):
             cond_dim=cond_dim,
             time_cond_dim=time_cond_dim,
             groups=resnet_groups[-1],
-            use_flash_attn=use_flash_attn,
         )
 
         # upsample klass
@@ -1632,7 +1579,6 @@ class Unet(nn.Module):
                                     time_cond_dim=time_cond_dim,
                                     groups=groups,
                                     use_gca=use_global_context_attn,
-                                    use_flash_attn=use_flash_attn,
                                 )
                                 for _ in range(layer_num_resnet_blocks)
                             ]
@@ -1673,7 +1619,6 @@ class Unet(nn.Module):
                 time_cond_dim=time_cond_dim,
                 groups=resnet_groups[0],
                 use_gca=True,
-                use_flash_attn=use_flash_attn,
             )
             if final_resnet_block
             else None
