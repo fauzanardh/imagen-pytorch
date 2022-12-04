@@ -877,59 +877,6 @@ class CrossAttention(nn.Module):
             nn.Linear(inner_dim, dim, bias=False), LayerNorm(dim)
         )
 
-    def flash_forward(self, x, context, mask=None):
-        b = x.shape[0]
-
-        x = self.norm(x)
-        context = self.norm_context(context)
-
-        q, k, v = (self.to_q(x), *self.to_kv(context).chunk(2, dim=-1))
-
-        q, k, v = rearrange_many((q, k, v), "b n (h d) -> b n h d", h=self.heads)
-
-        # add null key / value for classifier free guidance in prior net
-        nk, nv = repeat_many(
-            self.null_kv.unbind(dim=-2), "d -> b 1 h d", h=self.heads, b=b
-        )
-
-        k = torch.cat((nk, k), dim=-3)
-        v = torch.cat((nv, v), dim=-3)
-
-        max_seqlen_q = q.shape[1]
-        max_seqlen_k = k.shape[1]
-
-        cu_seqlens_q = torch.arange(
-            0,
-            max_seqlen_q * (b + 1),
-            step=max_seqlen_q,
-            device=x.device,
-            dtype=torch.int32,
-        )
-        cu_seqlens_k = torch.arange(
-            0,
-            max_seqlen_k * (b + 1),
-            step=max_seqlen_k,
-            device=x.device,
-            dtype=torch.int32,
-        )
-
-        q, k, v = rearrange_many((q, k, v), "b n h d -> (b n) h d", h=self.heads)
-
-        out = flash_attn_unpadded_func(
-            q.to(torch.float16),
-            k.to(torch.float16),
-            v.to(torch.float16),
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            dropout_p=0.0,
-            softmax_scale=self.scale,
-        ).to(x.dtype)
-
-        out = rearrange(out, "(b n) h d -> b n (h d)", b=b, n=max_seqlen_q)
-        return self.to_out(out)
-
     def vanilla_forward(self, x, context, mask=None):
         b = x.shape[0]
 
@@ -970,6 +917,59 @@ class CrossAttention(nn.Module):
 
         out = einsum("b h i j, b h j d -> b h i d", attn, v)
         out = rearrange(out, "b h n d -> b n (h d)")
+        return self.to_out(out)
+
+    def flash_forward(self, x, context, mask=None):
+        b = x.shape[0]
+
+        x = self.norm(x)
+        context = self.norm_context(context)
+
+        q, k, v = (self.to_q(x), *self.to_kv(context).chunk(2, dim=-1))
+
+        q, k, v = rearrange_many((q, k, v), "b n (h d) -> b n h d", h=self.heads)
+
+        # add null key / value for classifier free guidance in prior net
+        nk, nv = repeat_many(
+            self.null_kv.unbind(dim=-2), "d -> b 1 h d", h=self.heads, b=b
+        )
+
+        k = torch.cat((nk, k), dim=-3)
+        v = torch.cat((nv, v), dim=-3)
+        
+        max_seqlen_q = q.shape[1]
+        max_seqlen_k = k.shape[1]
+
+        cu_seqlens_q = torch.arange(
+            0,
+            max_seqlen_q * (b + 1),
+            step=max_seqlen_q,
+            device=x.device,
+            dtype=torch.int32,
+        )
+        cu_seqlens_k = torch.arange(
+            0,
+            max_seqlen_k * (b + 1),
+            step=max_seqlen_k,
+            device=x.device,
+            dtype=torch.int32,
+        )
+
+        q, k, v = rearrange_many((q, k, v), "b n h d -> (b n) h d", h=self.heads)
+
+        out = flash_attn_unpadded_func(
+            q.to(torch.float16),
+            k.to(torch.float16),
+            v.to(torch.float16),
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            dropout_p=0.0,
+            softmax_scale=self.scale,
+        ).to(x.dtype)
+
+        out = rearrange(out, "(b n) h d -> b n (h d)", b=b, n=max_seqlen_q)
         return self.to_out(out)
 
     def forward(self, x, context, mask=None):
