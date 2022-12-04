@@ -521,29 +521,25 @@ class Attention(nn.Module):
         heads=8,
         context_dim=None,
         cosine_sim_attn=False,
-        use_flash_attn=False,
     ):
         super().__init__()
-        self.use_flash_attn = use_flash_attn
-        assert not (
-            cosine_sim_attn and use_flash_attn
-        ), "cosine sim attn not supported for flash attention yet"
         self.scale = dim_head**-0.5 if not cosine_sim_attn else 1.0
         self.cosine_sim_attn = cosine_sim_attn
         self.cosine_sim_scale = 16 if cosine_sim_attn else 1
 
         self.heads = heads
         inner_dim = dim_head * heads
-        kv_dim = inner_dim if use_flash_attn else dim_head
 
         self.norm = LayerNorm(dim)
 
         self.null_kv = nn.Parameter(torch.randn(2, dim_head))
         self.to_q = nn.Linear(dim, inner_dim, bias=False)
-        self.to_kv = nn.Linear(dim, kv_dim * 2, bias=False)
+        self.to_kv = nn.Linear(dim, dim_head * 2, bias=False)
 
         self.to_context = (
-            nn.Sequential(nn.LayerNorm(context_dim), nn.Linear(context_dim, kv_dim * 2))
+            nn.Sequential(
+                nn.LayerNorm(context_dim), nn.Linear(context_dim, dim_head * 2)
+            )
             if exists(context_dim)
             else None
         )
@@ -552,7 +548,7 @@ class Attention(nn.Module):
             nn.Linear(inner_dim, dim, bias=False), LayerNorm(dim)
         )
 
-    def vanilla_forward(self, x, context=None, mask=None, attn_bias=None):
+    def forward(self, x, context=None, mask=None, attn_bias=None):
         b = x.shape[0]
 
         x = self.norm(x)
@@ -603,7 +599,42 @@ class Attention(nn.Module):
         out = rearrange(out, "b h n d -> b n (h d)")
         return self.to_out(out)
 
-    def flash_forward(self, x, context=None, mask=None, attn_bias=None):
+
+class FlashAttention(nn.Module):
+    def __init__(
+        self,
+        dim,
+        *,
+        dim_head=64,
+        heads=8,
+        context_dim=None,
+        cosine_sim_attn=False,  # unused, for later use
+    ):
+        super().__init__()
+        self.scale = dim_head**-0.5
+
+        self.heads = heads
+        inner_dim = dim_head * heads
+
+        self.norm = LayerNorm(dim)
+
+        self.null_kv = nn.Parameter(torch.randn(2, dim_head))
+        self.to_q = nn.Linear(dim, inner_dim, bias=False)
+        self.to_kv = nn.Linear(dim, inner_dim * 2, bias=False)
+
+        self.to_context = (
+            nn.Sequential(
+                nn.LayerNorm(context_dim), nn.Linear(context_dim, inner_dim * 2)
+            )
+            if exists(context_dim)
+            else None
+        )
+
+        self.to_out = nn.Sequential(
+            nn.Linear(inner_dim, dim, bias=False), LayerNorm(dim)
+        )
+
+    def forward(self, x, context=None, mask=None, attn_bias=None):
         b = x.shape[0]
 
         x = self.norm(x)
@@ -613,24 +644,20 @@ class Attention(nn.Module):
         q, k, v = rearrange_many((q, k, v), "b n (h d) -> b n h d", h=self.heads)
 
         # add null key / value for classifier free guidance in prior net
-        if self.use_flash_attn:
-            nk, nv = repeat_many(
-                self.null_kv.unbind(dim=-2), "d -> b 1 h d", b=b, h=self.heads
-            )
-        else:
-            nk, nv = repeat_many(self.null_kv.unbind(dim=-2), "d -> b 1 d", b=b)
+        nk, nv = repeat_many(
+            self.null_kv.unbind(dim=-2), "d -> b 1 h d", b=b, h=self.heads
+        )
 
-        k = torch.cat((nk, k), dim=-3 if self.use_flash_attn else -2)
-        v = torch.cat((nv, v), dim=-3 if self.use_flash_attn else -2)
+        k = torch.cat((nk, k), dim=-3)
+        v = torch.cat((nv, v), dim=-3)
 
         # add text conditioning, if present
         if exists(context):
             assert exists(self.to_context)
             ck, cv = self.to_context(context).chunk(2, dim=-1)
-            if self.use_flash_attn:
-                ck, cv = rearrange_many((ck, cv), "b n (h d) -> b n h d", h=self.heads)
-            k = torch.cat((ck, k), dim=-3 if self.use_flash_attn else -2)
-            v = torch.cat((cv, v), dim=-3 if self.use_flash_attn else -2)
+            ck, cv = rearrange_many((ck, cv), "b n (h d) -> b n h d", h=self.heads)
+            k = torch.cat((ck, k), dim=-3)
+            v = torch.cat((cv, v), dim=-3)
 
         max_seqlen_q = q.shape[1]
         max_seqlen_k = k.shape[1]
@@ -668,12 +695,6 @@ class Attention(nn.Module):
         # convert back to [B N (H D)]
         out = rearrange(out, "(b n) h d -> b n (h d)", b=b, h=self.heads)
         return self.to_out(out)
-
-    def forward(self, x, context=None, mask=None, attn_bias=None):
-        if self.use_flash_attn:
-            return self.flash_forward(x, context, mask, attn_bias)
-        else:
-            return self.vanilla_forward(x, context, mask, attn_bias)
 
 
 # decoder
@@ -784,6 +805,7 @@ class ResnetBlock(nn.Module):
         time_cond_dim=None,
         groups=8,
         linear_attn=False,
+        use_flash_attn=False,
         use_gca=False,
         squeeze_excite=False,
         **attn_kwargs,
@@ -800,7 +822,12 @@ class ResnetBlock(nn.Module):
         self.cross_attn = None
 
         if exists(cond_dim):
-            attn_klass = CrossAttention if not linear_attn else LinearCrossAttention
+            if use_flash_attn:
+                attn_klass = FlashCrossAttention
+            elif linear_attn:
+                attn_klass = LinearCrossAttention
+            else:
+                attn_klass = CrossAttention
 
             self.cross_attn = attn_klass(
                 dim=dim_out, context_dim=cond_dim, **attn_kwargs
@@ -850,13 +877,8 @@ class CrossAttention(nn.Module):
         heads=8,
         norm_context=False,
         cosine_sim_attn=False,
-        use_flash_attn=False,
     ):
         super().__init__()
-        self.use_flash_attn = use_flash_attn
-        assert not (
-            cosine_sim_attn and use_flash_attn
-        ), "cosine sim attn not supported for flash attention yet"
         self.scale = dim_head**-0.5 if not cosine_sim_attn else 1.0
         self.cosine_sim_attn = cosine_sim_attn
         self.cosine_sim_scale = 16 if cosine_sim_attn else 1
@@ -877,7 +899,7 @@ class CrossAttention(nn.Module):
             nn.Linear(inner_dim, dim, bias=False), LayerNorm(dim)
         )
 
-    def vanilla_forward(self, x, context, mask=None):
+    def forward(self, x, context, mask=None):
         b = x.shape[0]
 
         x = self.norm(x)
@@ -919,7 +941,38 @@ class CrossAttention(nn.Module):
         out = rearrange(out, "b h n d -> b n (h d)")
         return self.to_out(out)
 
-    def flash_forward(self, x, context, mask=None):
+
+class FlashCrossAttention(nn.Module):
+    def __init__(
+        self,
+        dim,
+        *,
+        context_dim=None,
+        dim_head=64,
+        heads=8,
+        norm_context=False,
+        cosine_sim_attn=False,  # unused, for later use
+    ):
+        super().__init__()
+        self.scale = dim_head**-0.5
+
+        self.heads = heads
+        inner_dim = dim_head * heads
+
+        context_dim = default(context_dim, dim)
+
+        self.norm = LayerNorm(dim)
+        self.norm_context = LayerNorm(context_dim) if norm_context else Identity()
+
+        self.null_kv = nn.Parameter(torch.randn(2, dim_head))
+        self.to_q = nn.Linear(dim, inner_dim, bias=False)
+        self.to_kv = nn.Linear(context_dim, inner_dim * 2, bias=False)
+
+        self.to_out = nn.Sequential(
+            nn.Linear(inner_dim, dim, bias=False), LayerNorm(dim)
+        )
+
+    def forward(self, x, context, mask=None):
         b = x.shape[0]
 
         x = self.norm(x)
@@ -936,7 +989,7 @@ class CrossAttention(nn.Module):
 
         k = torch.cat((nk, k), dim=-3)
         v = torch.cat((nv, v), dim=-3)
-        
+
         max_seqlen_q = q.shape[1]
         max_seqlen_k = k.shape[1]
 
@@ -971,12 +1024,6 @@ class CrossAttention(nn.Module):
 
         out = rearrange(out, "(b n) h d -> b n (h d)", b=b, n=max_seqlen_q)
         return self.to_out(out)
-
-    def forward(self, x, context, mask=None):
-        if self.use_flash_attn:
-            return self.flash_forward(x, context, mask=mask)
-        else:
-            return self.vanilla_forward(x, context, mask=mask)
 
 
 class LinearCrossAttention(CrossAttention):
@@ -1152,17 +1199,18 @@ class TransformerBlock(nn.Module):
         super().__init__()
         self.layers = nn.ModuleList([])
 
+        attn_klass = FlashAttention if use_flash_attn else Attention
+
         for _ in range(depth):
             self.layers.append(
                 nn.ModuleList(
                     [
-                        Attention(
+                        attn_klass(
                             dim=dim,
                             heads=heads,
                             dim_head=dim_head,
                             context_dim=context_dim,
                             cosine_sim_attn=cosine_sim_attn,
-                            use_flash_attn=use_flash_attn,
                         ),
                         FeedForward(dim=dim, mult=ff_mult),
                     ]
@@ -1345,6 +1393,10 @@ class Unet(nn.Module):
             (use_linear_attn or use_linear_cross_attn) and use_flash_attn
         ), "you can't use both linear and flash attention"
 
+        assert not (
+            cosine_sim_attn and use_flash_attn
+        ), "cosine similarity attention is not compatible with flash attention (yet)"
+
         if dim < 128:
             print_once(
                 "The base dimension of your u-net should ideally be no smaller than 128, as recommended by a professional DDPM trainer https://nonint.com/2022/05/04/friends-dont-let-friends-train-small-diffusion-models/"
@@ -1485,7 +1537,6 @@ class Unet(nn.Module):
             heads=attn_heads,
             dim_head=attn_dim_head,
             cosine_sim_attn=cosine_sim_attn,
-            use_flash_attn=use_flash_attn,
         )
 
         num_layers = len(in_out)
@@ -1494,7 +1545,9 @@ class Unet(nn.Module):
         num_resnet_blocks = cast_tuple(num_resnet_blocks, num_layers)
         resnet_groups = cast_tuple(resnet_groups, num_layers)
 
-        resnet_klass = partial(ResnetBlock, **attn_kwargs)
+        resnet_klass = partial(
+            ResnetBlock, use_flash_attn=use_flash_attn, **attn_kwargs
+        )
 
         layer_attns = cast_tuple(layer_attns, num_layers)
         layer_attns_depth = cast_tuple(layer_attns_depth, num_layers)
@@ -1643,6 +1696,7 @@ class Unet(nn.Module):
                             depth=layer_attn_depth,
                             ff_mult=ff_mult,
                             context_dim=cond_dim,
+                            use_flash_attn=use_flash_attn,
                             **attn_kwargs,
                         ),
                         post_downsample,
@@ -1667,6 +1721,7 @@ class Unet(nn.Module):
                 mid_dim,
                 depth=layer_mid_attns_depth,
                 context_dim=mid_context_dim,
+                use_flash_attn=use_flash_attn,
                 **attn_kwargs,
             )
             if attend_at_middle
@@ -1754,6 +1809,7 @@ class Unet(nn.Module):
                             depth=layer_attn_depth,
                             ff_mult=ff_mult,
                             context_dim=cond_dim,
+                            use_flash_attn=use_flash_attn,
                             **attn_kwargs,
                         ),
                         upsample_klass(dim_out, dim_in)
