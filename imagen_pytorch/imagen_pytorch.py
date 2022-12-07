@@ -14,7 +14,7 @@ from torch import nn, einsum
 from torch.cuda.amp import autocast
 from torch.special import expm1
 import torchvision.transforms as T
-from flash_attn.flash_attn_interface import flash_attn_unpadded_func
+from flash_attn.flash_attn_interface import flash_attn_unpadded_kvpacked_func
 
 import kornia.augmentation as K
 from resize_right import resize, interp_methods
@@ -639,28 +639,23 @@ class FlashAttention(nn.Module):
 
         x = self.norm(x)
 
-        q, k, v = (self.to_q(x), *self.to_kv(x).chunk(2, dim=-1))
-
-        q, k, v = rearrange_many((q, k, v), "b n (h d) -> b n h d", h=self.heads)
+        q = rearrange(self.to_q(x), "b n (h d) -> b n h d", h=self.heads)
+        kv = rearrange(self.to_kv(x), "b n (two h d) -> b n two h d", two=2, h=self.heads)
 
         # add null key / value for classifier free guidance in prior net
-        nk, nv = repeat_many(
-            self.null_kv.unbind(dim=-2), "d -> b 1 h d", b=b, h=self.heads
-        )
+        nkv = repeat(self.null_kv, "two d -> b 1 two h d", two=2, h=self.heads, b=b)
 
-        k = torch.cat((nk, k), dim=-3)
-        v = torch.cat((nv, v), dim=-3)
+        kv = torch.cat((nkv, kv), dim=-4)
 
         # add text conditioning, if present
         if exists(context):
             assert exists(self.to_context)
-            ck, cv = self.to_context(context).chunk(2, dim=-1)
-            ck, cv = rearrange_many((ck, cv), "b n (h d) -> b n h d", h=self.heads)
-            k = torch.cat((ck, k), dim=-3)
-            v = torch.cat((cv, v), dim=-3)
+            ckv = rearrange(self.to_context(context), "b n (two h d) -> b n two h d", two=2, h=self.heads)
+            kv = torch.cat((ckv, kv), dim=-4)
 
         max_seqlen_q = q.shape[1]
-        max_seqlen_k = k.shape[1]
+        max_seqlen_k = kv.shape[1]
+
         cu_seqlens_q = torch.arange(
             0,
             max_seqlen_q * (b + 1),
@@ -677,13 +672,13 @@ class FlashAttention(nn.Module):
         )
 
         # convert to [(B N) H D] to use in flash attention
-        q, k, v = rearrange_many((q, k, v), "b n h d -> (b n) h d")
+        q = rearrange(q, "b n h d -> (b n) h d", h=self.heads)
+        kv = rearrange(kv, "b n two h d -> (b n) two h d", two=2, h=self.heads)
 
         # flash attention
-        out = flash_attn_unpadded_func(
+        out = flash_attn_unpadded_kvpacked_func(
             q.to(torch.float16),
-            k.to(torch.float16),
-            v.to(torch.float16),
+            kv.to(torch.float16),
             cu_seqlens_q,
             cu_seqlens_k,
             max_seqlen_q,
@@ -978,20 +973,16 @@ class FlashCrossAttention(nn.Module):
         x = self.norm(x)
         context = self.norm_context(context)
 
-        q, k, v = (self.to_q(x), *self.to_kv(context).chunk(2, dim=-1))
-
-        q, k, v = rearrange_many((q, k, v), "b n (h d) -> b n h d", h=self.heads)
+        q = rearrange(self.to_q(x), "b n (h d) -> b n h d", h=self.heads)
+        kv = rearrange(self.to_kv(context), "b n (two h d) -> b n two h d", two=2, h=self.heads)
 
         # add null key / value for classifier free guidance in prior net
-        nk, nv = repeat_many(
-            self.null_kv.unbind(dim=-2), "d -> b 1 h d", h=self.heads, b=b
-        )
+        nkv = repeat(self.null_kv, "two d -> b 1 two h d", two=2, h=self.heads, b=b)
 
-        k = torch.cat((nk, k), dim=-3)
-        v = torch.cat((nv, v), dim=-3)
+        kv = torch.cat((nkv, kv), dim=-4)
 
         max_seqlen_q = q.shape[1]
-        max_seqlen_k = k.shape[1]
+        max_seqlen_k = kv.shape[1]
 
         cu_seqlens_q = torch.arange(
             0,
@@ -1008,12 +999,12 @@ class FlashCrossAttention(nn.Module):
             dtype=torch.int32,
         )
 
-        q, k, v = rearrange_many((q, k, v), "b n h d -> (b n) h d", h=self.heads)
+        q = rearrange(q, "b n h d -> (b n) h d", h=self.heads)
+        kv = rearrange(kv, "b n two h d -> (b n) two h d", two=2, h=self.heads)
 
-        out = flash_attn_unpadded_func(
+        out = flash_attn_unpadded_kvpacked_func(
             q.to(torch.float16),
-            k.to(torch.float16),
-            v.to(torch.float16),
+            kv.to(torch.float16),
             cu_seqlens_q,
             cu_seqlens_k,
             max_seqlen_q,
