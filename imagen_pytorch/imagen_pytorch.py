@@ -14,7 +14,7 @@ from torch import nn, einsum
 from torch.cuda.amp import autocast
 from torch.special import expm1
 import torchvision.transforms as T
-from flash_attn.flash_attn_interface import flash_attn_unpadded_kvpacked_func
+from xformers.ops import memory_efficient_attention
 
 import kornia.augmentation as K
 from resize_right import resize, interp_methods
@@ -652,43 +652,11 @@ class FlashAttention(nn.Module):
             assert exists(self.to_context)
             ckv = rearrange(self.to_context(context), "b n (two h d) -> b n two h d", two=2, h=self.heads)
             kv = torch.cat((ckv, kv), dim=-4)
+        
+        k, v = kv.unbind(dim=-3)
+        out = memory_efficient_attention(q, k, v)
 
-        max_seqlen_q = q.shape[1]
-        max_seqlen_k = kv.shape[1]
-
-        cu_seqlens_q = torch.arange(
-            0,
-            max_seqlen_q * (b + 1),
-            step=max_seqlen_q,
-            device=x.device,
-            dtype=torch.int32,
-        )
-        cu_seqlens_k = torch.arange(
-            0,
-            max_seqlen_k * (b + 1),
-            step=max_seqlen_k,
-            device=x.device,
-            dtype=torch.int32,
-        )
-
-        # convert to [(B N) H D] to use in flash attention
-        q = rearrange(q, "b n h d -> (b n) h d", h=self.heads)
-        kv = rearrange(kv, "b n two h d -> (b n) two h d", two=2, h=self.heads)
-
-        # flash attention
-        out = flash_attn_unpadded_kvpacked_func(
-            q.to(torch.float16),
-            kv.to(torch.float16),
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            dropout_p=0.0,
-            softmax_scale=self.scale,
-        ).to(x.dtype)
-
-        # convert back to [B N (H D)]
-        out = rearrange(out, "(b n) h d -> b n (h d)", b=b, h=self.heads)
+        out = rearrange(out, "b n h d -> b n (h d)", b=b, h=self.heads)
         return self.to_out(out)
 
 
@@ -981,39 +949,10 @@ class FlashCrossAttention(nn.Module):
 
         kv = torch.cat((nkv, kv), dim=-4)
 
-        max_seqlen_q = q.shape[1]
-        max_seqlen_k = kv.shape[1]
+        k, v = kv.unbind(dim=-3)
+        out = memory_efficient_attention(q, k, v)
 
-        cu_seqlens_q = torch.arange(
-            0,
-            max_seqlen_q * (b + 1),
-            step=max_seqlen_q,
-            device=x.device,
-            dtype=torch.int32,
-        )
-        cu_seqlens_k = torch.arange(
-            0,
-            max_seqlen_k * (b + 1),
-            step=max_seqlen_k,
-            device=x.device,
-            dtype=torch.int32,
-        )
-
-        q = rearrange(q, "b n h d -> (b n) h d", h=self.heads)
-        kv = rearrange(kv, "b n two h d -> (b n) two h d", two=2, h=self.heads)
-
-        out = flash_attn_unpadded_kvpacked_func(
-            q.to(torch.float16),
-            kv.to(torch.float16),
-            cu_seqlens_q,
-            cu_seqlens_k,
-            max_seqlen_q,
-            max_seqlen_k,
-            dropout_p=0.0,
-            softmax_scale=self.scale,
-        ).to(x.dtype)
-
-        out = rearrange(out, "(b n) h d -> b n (h d)", b=b, n=max_seqlen_q)
+        out = rearrange(out, "b n h d -> b n (h d)", b=b, h=self.heads)
         return self.to_out(out)
 
 
