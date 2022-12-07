@@ -640,7 +640,9 @@ class FlashAttention(nn.Module):
         x = self.norm(x)
 
         q = rearrange(self.to_q(x), "b n (h d) -> b n h d", h=self.heads)
-        kv = rearrange(self.to_kv(x), "b n (two h d) -> b n two h d", two=2, h=self.heads)
+        kv = rearrange(
+            self.to_kv(x), "b n (two h d) -> b n two h d", two=2, h=self.heads
+        )
 
         # add null key / value for classifier free guidance in prior net
         nkv = repeat(self.null_kv, "two d -> b 1 two h d", two=2, h=self.heads, b=b)
@@ -650,9 +652,14 @@ class FlashAttention(nn.Module):
         # add text conditioning, if present
         if exists(context):
             assert exists(self.to_context)
-            ckv = rearrange(self.to_context(context), "b n (two h d) -> b n two h d", two=2, h=self.heads)
+            ckv = rearrange(
+                self.to_context(context),
+                "b n (two h d) -> b n two h d",
+                two=2,
+                h=self.heads,
+            )
             kv = torch.cat((ckv, kv), dim=-4)
-        
+
         k, v = kv.unbind(dim=-3)
         out = memory_efficient_attention(q, k, v)
 
@@ -942,7 +949,9 @@ class FlashCrossAttention(nn.Module):
         context = self.norm_context(context)
 
         q = rearrange(self.to_q(x), "b n (h d) -> b n h d", h=self.heads)
-        kv = rearrange(self.to_kv(context), "b n (two h d) -> b n two h d", two=2, h=self.heads)
+        kv = rearrange(
+            self.to_kv(context), "b n (two h d) -> b n two h d", two=2, h=self.heads
+        )
 
         # add null key / value for classifier free guidance in prior net
         nkv = repeat(self.null_kv, "two d -> b 1 two h d", two=2, h=self.heads, b=b)
