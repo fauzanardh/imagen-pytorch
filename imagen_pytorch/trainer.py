@@ -3,6 +3,7 @@ from math import ceil
 from contextlib import contextmanager, nullcontext
 from functools import partial, wraps
 from collections.abc import Iterable
+from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -417,6 +418,7 @@ class ImagenTrainer(nn.Module):
         ) in enumerate(
             zip(self.imagen.unets, lr, eps, warmup_steps, cosine_decay_max_steps)
         ):
+            optimizer: Optional[Union[Adam, AdamW, Adafactor]] = None
             if optimizer_class == "adam":
                 optimizer = Adam(
                     unet.parameters(),
@@ -460,7 +462,8 @@ class ImagenTrainer(nn.Module):
 
             scaler = GradScaler(enabled=grad_scaler_enabled)
 
-            scheduler = warmup_scheduler = None
+            scheduler: Optional[Union[CosineAnnealingLR, LambdaLR]] = None
+            warmup_scheduler = None
 
             if exists(unet_cosine_decay_max_steps):
                 scheduler = CosineAnnealingLR(
@@ -1059,7 +1062,7 @@ class ImagenTrainer(nn.Module):
         unet = self.unet_being_trained
 
         optimizer = getattr(self, f"optim{index}")
-        scaler = getattr(self, f"scaler{index}")
+        # scaler = getattr(self, f"scaler{index}")
         scheduler = getattr(self, f"scheduler{index}")
         warmup_scheduler = getattr(self, f"warmup{index}")
 

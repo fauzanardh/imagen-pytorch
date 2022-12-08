@@ -19,7 +19,7 @@ def test_trainer_instantiation():
         image_sizes=(64,),
     ).create()
 
-    trainer = ImagenTrainer(imagen=imagen)
+    ImagenTrainer(imagen=imagen)
 
 
 def test_trainer_step():

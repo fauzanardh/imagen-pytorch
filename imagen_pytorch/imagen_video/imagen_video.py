@@ -457,10 +457,12 @@ class Attention(nn.Module):
         )
 
     def forward(self, x, context=None, mask=None, attn_bias=None):
-        b, n, device = *x.shape[:2], x.device
+        b, n = x.shape[:2]
+        device = x.device
 
         x = self.norm(x)
-        q, k, v = (self.to_q(x), *self.to_kv(x).chunk(2, dim=-1))
+        q = self.to_q(x)
+        k, v = self.to_kv(x).chunk(2, dim=-1)
 
         q = rearrange(q, "b n (h d) -> b h n d", h=self.heads)
         q = q * self.scale
@@ -732,12 +734,13 @@ class CrossAttention(nn.Module):
         )
 
     def forward(self, x, context, mask=None):
-        b, _, _ = *x.shape[:2], x.device
+        b = x.shape[0]
 
         x = self.norm(x)
         context = self.norm_context(context)
 
-        q, k, v = (self.to_q(x), *self.to_kv(context).chunk(2, dim=-1))
+        q = self.to_q(x)
+        k, v = self.to_kv(context).chunk(2, dim=-1)
 
         q, k, v = rearrange_many((q, k, v), "b n (h d) -> b h n d", h=self.heads)
 
@@ -775,12 +778,13 @@ class CrossAttention(nn.Module):
 
 class LinearCrossAttention(CrossAttention):
     def forward(self, x, context, mask=None):
-        b, _, _ = *x.shape[:2], x.device
+        b = x.shape[0]
 
         x = self.norm(x)
         context = self.norm_context(context)
 
-        q, k, v = (self.to_q(x), *self.to_kv(context).chunk(2, dim=-1))
+        q = self.to_q(x)
+        k, v = self.to_kv(context).chunk(2, dim=-1)
 
         q, k, v = rearrange_many((q, k, v), "b n (h d) -> (b h) n d", h=self.heads)
 
@@ -857,7 +861,8 @@ class LinearAttention(nn.Module):
         )
 
     def forward(self, fmap, context=None):
-        h, x, y = self.heads, *fmap.shape[-2:]
+        h = self.heads
+        x, y = fmap.shape[-2:]
 
         fmap = self.norm(fmap)
         q, k, v = map(lambda fn: fn(fmap), (self.to_q, self.to_k, self.to_v))

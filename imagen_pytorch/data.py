@@ -3,7 +3,7 @@ from functools import partial
 
 import torch
 from torch import nn
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset as PytorchDataset, DataLoader
 from torchvision import transforms as T
 from imagen_pytorch.t5_encoder import t5_encode_text
 from torch.nn.utils.rnn import pad_sequence
@@ -15,6 +15,7 @@ import io
 import urllib
 
 USER_AGENT = get_datasets_user_agent()
+
 
 # helpers functions
 def exists(val):
@@ -61,7 +62,7 @@ class Collator:
                 else:
                     image = item[self.image_label]
                 image = self.transform(image.convert(self.channels))
-            except:
+            except Exception:
                 continue
 
             text = t5_encode_text([item[self.text_label]], name=self.name)
@@ -93,7 +94,7 @@ class Collator:
         return image
 
 
-class Dataset(Dataset):
+class Dataset(PytorchDataset):
     def __init__(
         self,
         folder,

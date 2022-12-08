@@ -553,7 +553,8 @@ class Attention(nn.Module):
 
         x = self.norm(x)
 
-        q, k, v = (self.to_q(x), *self.to_kv(x).chunk(2, dim=-1))
+        q = self.to_q(x)
+        k, v = self.to_kv(x).chunk(2, dim=-1)
 
         q = rearrange(q, "b n (h d) -> b h n d", h=self.heads)
         q = q * self.scale
@@ -879,7 +880,8 @@ class CrossAttention(nn.Module):
         x = self.norm(x)
         context = self.norm_context(context)
 
-        q, k, v = (self.to_q(x), *self.to_kv(context).chunk(2, dim=-1))
+        q = self.to_q(x)
+        k, v = self.to_kv(context).chunk(2, dim=-1)
 
         q, k, v = rearrange_many((q, k, v), "b n (h d) -> b h n d", h=self.heads)
 
@@ -980,7 +982,8 @@ class LinearCrossAttention(CrossAttention):
         x = self.norm(x)
         context = self.norm_context(context)
 
-        q, k, v = (self.to_q(x), *self.to_kv(context).chunk(2, dim=-1))
+        q = self.to_q(x)
+        k, v = self.to_kv(context).chunk(2, dim=-1)
 
         q, k, v = rearrange_many((q, k, v), "b n (h d) -> (b h) n d", h=self.heads)
 
@@ -1057,7 +1060,8 @@ class LinearAttention(nn.Module):
         )
 
     def forward(self, fmap, context=None):
-        h, x, y = self.heads, *fmap.shape[-2:]
+        h = self.heads
+        x, y = fmap.shape[-2:]
 
         fmap = self.norm(fmap)
         q, k, v = map(lambda fn: fn(fmap), (self.to_q, self.to_k, self.to_v))
@@ -2633,7 +2637,7 @@ class Imagen(nn.Module):
         cond_images = maybe(cast_uint8_images_to_float)(cond_images)
 
         if exists(texts) and not exists(text_embeds) and not self.unconditional:
-            assert all([*map(len, texts)]), "text cannot be empty"
+            assert all([*map(len, texts)]), "text cannot be empty"  # type: ignore
 
             with autocast(enabled=False):
                 text_embeds, text_masks = self.encode_text(texts, return_attn_mask=True)
@@ -2816,7 +2820,7 @@ class Imagen(nn.Module):
         )  # either return last unet output or all unet outputs
 
         if not return_pil_images:
-            return outputs[output_index]
+            return outputs[output_index]  # type: ignore
 
         if not return_all_unet_outputs:
             outputs = outputs[-1:]
@@ -2829,7 +2833,7 @@ class Imagen(nn.Module):
             map(lambda img: list(map(T.ToPILImage(), img.unbind(dim=0))), outputs)
         )
 
-        return pil_images[
+        return pil_images[  # type: ignore
             output_index
         ]  # now you have a bunch of pillow images you can just .save(/where/ever/you/want.png)
 
@@ -3015,22 +3019,21 @@ class Imagen(nn.Module):
         random_crop_size = self.random_crop_sizes[unet_index]
         prev_image_size = self.image_sizes[unet_index - 1] if unet_index > 0 else None
 
-        b, *_, h, w, device, is_video = (
-            *images.shape,
-            images.device,
-            images.ndim == 5,
-        )
+        b = images.shape[0]
+        h, w = images.shape[-2:]
+        device = images.device
+        # is_video = images.ndim == 5
 
         check_shape(images, "b c ...", c=self.channels)
         assert h >= target_image_size and w >= target_image_size
 
-        frames = images.shape[2] if is_video else None
+        # frames = images.shape[2] if is_video else None
 
         times = noise_scheduler.sample_random_times(b, device=device)
 
         if exists(texts) and not exists(text_embeds) and not self.unconditional:
-            assert all([*map(len, texts)]), "text cannot be empty"
-            assert len(texts) == len(
+            assert all([*map(len, texts)]), "text cannot be empty"  # type: ignore
+            assert len(texts) == len(  # type: ignore
                 images
             ), "number of text captions does not match up with the number of images given"
 

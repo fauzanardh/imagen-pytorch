@@ -2,8 +2,7 @@ from math import sqrt
 from random import random
 from functools import partial
 from contextlib import contextmanager, nullcontext
-from typing import List, Union
-from collections import namedtuple
+from typing import List, Union, NamedTuple
 from tqdm.auto import tqdm
 
 import torch
@@ -52,21 +51,20 @@ from imagen_pytorch.clip_encoder import (
     DEFAULT_CLIP_NAME,
 )
 
+
 # constants
-Hparams_fields = [
-    "num_sample_steps",
-    "sigma_min",
-    "sigma_max",
-    "sigma_data",
-    "rho",
-    "P_mean",
-    "P_std",
-    "S_churn",
-    "S_tmin",
-    "S_tmax",
-    "S_noise",
-]
-Hparams = namedtuple("Hparams", Hparams_fields)
+class Hparams(NamedTuple):
+    num_sample_steps: int
+    sigma_min: float
+    sigma_max: float
+    sigma_data: float
+    rho: float
+    P_mean: float
+    P_std: float
+    S_churn: float
+    S_tmin: float
+    S_tmax: float
+    S_noise: float
 
 
 # helper functions
@@ -613,7 +611,7 @@ class ElucidatedImagen(nn.Module):
         cond_images = maybe(cast_uint8_images_to_float)(cond_images)
 
         if exists(texts) and not exists(text_embeds) and not self.unconditional:
-            assert all([*map(len, texts)]), "text cannot be empty"
+            assert all([*map(len, texts)]), "text cannot be empty"  # type: ignore
 
             with autocast(enabled=False):
                 text_embeds, text_masks = self.encode_text(texts, return_attn_mask=True)
@@ -804,7 +802,7 @@ class ElucidatedImagen(nn.Module):
         )  # either return last unet output or all unet outputs
 
         if not return_pil_images:
-            return outputs[output_index]
+            return outputs[output_index]  # type: ignore
 
         if not return_all_unet_outputs:
             outputs = outputs[-1:]
@@ -817,7 +815,7 @@ class ElucidatedImagen(nn.Module):
             map(lambda img: list(map(T.ToPILImage(), img.unbind(dim=0))), outputs)
         )
 
-        return pil_images[
+        return pil_images[  # type: ignore
             output_index
         ]  # now you have a bunch of pillow images you can just .save(/where/ever/you/want.png)
 
@@ -868,11 +866,10 @@ class ElucidatedImagen(nn.Module):
         prev_image_size = self.image_sizes[unet_index - 1] if unet_index > 0 else None
         hp = self.hparams[unet_index]
 
-        batch_size, *_, h, w, device, is_video = (
-            *images.shape,
-            images.device,
-            (images.ndim == 5),
-        )
+        batch_size = images.shape[0]
+        h, w = images.shape[-2:]
+        device = images.device
+        is_video = images.ndim == 5
 
         frames = images.shape[2] if is_video else None
 
@@ -881,8 +878,8 @@ class ElucidatedImagen(nn.Module):
         assert h >= target_image_size[0] and w >= target_image_size[1]
 
         if exists(texts) and not exists(text_embeds) and not self.unconditional:
-            assert all([*map(len, texts)]), "text cannot be empty"
-            assert len(texts) == len(
+            assert all([*map(len, texts)]), "text cannot be empty"  # type: ignore
+            assert len(texts) == len(  # type: ignore
                 images
             ), "number of text captions does not match up with the number of images given"
 
