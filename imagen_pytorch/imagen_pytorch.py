@@ -14,7 +14,7 @@ from torch import nn, einsum
 from torch.cuda.amp import autocast
 from torch.special import expm1
 import torchvision.transforms as T
-from xformers.ops import memory_efficient_attention
+from xformers.ops import memory_efficient_attention, MemoryEfficientAttentionFlashAttentionOp
 
 import kornia.augmentation as K
 from resize_right import resize, interp_methods
@@ -662,14 +662,14 @@ class FlashAttention(nn.Module):
             kv = torch.cat((ckv, kv), dim=-4)
 
         k, v = kv.unbind(dim=-3)
-        # convert everything to float32 for training stability
-        q = q.to(torch.float32)
-        k = k.to(torch.float32)
-        v = v.to(torch.float32)
-        out = memory_efficient_attention(q, k, v, scale=self.scale)
+
+        q = q.to(torch.float16)
+        k = k.to(torch.float16)
+        v = v.to(torch.float16)
+        out = memory_efficient_attention(q, k, v, scale=self.scale, op=MemoryEfficientAttentionFlashAttentionOp)
 
         out = rearrange(out, "b n h d -> b n (h d)", b=b, h=self.heads)
-        return self.to_out(out)
+        return self.to_out(out.to(x.dtype))
 
 
 # decoder
@@ -965,14 +965,14 @@ class FlashCrossAttention(nn.Module):
         kv = torch.cat((nkv, kv), dim=-4)
 
         k, v = kv.unbind(dim=-3)
-        # convert everything to float32 for training stability
-        q = q.to(torch.float32)
-        k = k.to(torch.float32)
-        v = v.to(torch.float32)
-        out = memory_efficient_attention(q, k, v, scale=self.scale)
+
+        q = q.to(torch.float16)
+        k = k.to(torch.float16)
+        v = v.to(torch.float16)
+        out = memory_efficient_attention(q, k, v, scale=self.scale, op=MemoryEfficientAttentionFlashAttentionOp)
 
         out = rearrange(out, "b n h d -> b n (h d)", b=b, h=self.heads)
-        return self.to_out(out)
+        return self.to_out(out.to(x.dtype))
 
 
 class LinearCrossAttention(CrossAttention):
