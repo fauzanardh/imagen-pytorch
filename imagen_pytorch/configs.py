@@ -110,7 +110,9 @@ class ElucidatedImagenConfig(AllowExtraBaseModel):
         List[Union[UnetConfig, Unet3DConfig, NullUnetConfig]],
         Tuple[Union[UnetConfig, Unet3DConfig, NullUnetConfig]],
     ]
-    image_sizes: Union[List[int], Tuple[int]]
+    image_sizes: Union[
+        List[Union[List[int], Tuple[int]]], Tuple[Union[List[int], Tuple[int]]]
+    ]
     video: bool = False
     text_encoder_type: str = "t5"
     text_encoder_name: Optional[str] = None

@@ -14,7 +14,10 @@ from torch import nn, einsum
 from torch.cuda.amp import autocast
 from torch.special import expm1
 import torchvision.transforms as T
-from xformers.ops import memory_efficient_attention, MemoryEfficientAttentionFlashAttentionOp
+from xformers.ops import (
+    memory_efficient_attention,
+    MemoryEfficientAttentionFlashAttentionOp,
+)
 
 import kornia.augmentation as K
 from resize_right import resize, interp_methods
@@ -666,7 +669,9 @@ class FlashAttention(nn.Module):
         q = q.to(torch.float16)
         k = k.to(torch.float16)
         v = v.to(torch.float16)
-        out = memory_efficient_attention(q, k, v, scale=self.scale, op=MemoryEfficientAttentionFlashAttentionOp)
+        out = memory_efficient_attention(
+            q, k, v, scale=self.scale, op=MemoryEfficientAttentionFlashAttentionOp
+        )
 
         out = rearrange(out, "b n h d -> b n (h d)", b=b, h=self.heads)
         return self.to_out(out.to(x.dtype))
@@ -969,7 +974,9 @@ class FlashCrossAttention(nn.Module):
         q = q.to(torch.float16)
         k = k.to(torch.float16)
         v = v.to(torch.float16)
-        out = memory_efficient_attention(q, k, v, scale=self.scale, op=MemoryEfficientAttentionFlashAttentionOp)
+        out = memory_efficient_attention(
+            q, k, v, scale=self.scale, op=MemoryEfficientAttentionFlashAttentionOp
+        )
 
         out = rearrange(out, "b n h d -> b n (h d)", b=b, h=self.heads)
         return self.to_out(out.to(x.dtype))
@@ -1868,9 +1875,11 @@ class Unet(nn.Module):
 
     # forward with classifier free guidance
     def forward_with_cond_scale(self, *args, cond_scale=1.0, **kwargs):
-        logits = self.forward(*args, **kwargs)
+        cond_drop_prob = 1.0 if cond_scale == 0.0 else 0.0
 
-        if cond_scale == 1:
+        logits = self.forward(*args, cond_drop_prob=cond_drop_prob, **kwargs)
+
+        if cond_scale in [1.0, 0.0]:
             return logits
 
         null_logits = self.forward(*args, cond_drop_prob=1.0, **kwargs)
