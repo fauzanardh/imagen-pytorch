@@ -1,6 +1,6 @@
 import numpy as np
 from functools import partial
-from einops import rearrange, pack
+from einops import rearrange, pack, unpack
 
 import torch
 from torch import nn
@@ -11,6 +11,8 @@ from imagen_pytorch.imagen_pytorch import (
     CrossEmbedLayer,
     Upsample,
     PixelShuffleUpsample,
+    FlashAttention,
+    Attention,
 )
 
 
@@ -94,6 +96,7 @@ class Encoder(nn.Module):
         resnet_klass = partial(
             ResnetBlock, use_flash_attn=use_flash_attn, **attn_kwargs
         )
+        attn_klass = Attention if not use_flash_attn else FlashAttention
 
         downsample_klass = Downsample
         if cross_embed_downsample:
@@ -108,6 +111,7 @@ class Encoder(nn.Module):
         self.down = nn.ModuleList()
         for i in range(self.num_resolutions):
             block = nn.ModuleList()
+            attn = nn.ModuleList()
             block_in = in_dim * in_dim_mults[i]
             block_out = in_dim * dim_mults[i]
             for _ in range(num_resnet_blocks):
@@ -115,10 +119,18 @@ class Encoder(nn.Module):
                     resnet_klass(
                         block_in,
                         block_out,
-                        cond_dim=current_res if attn_enabled[i] else None,
                         groups=resnet_groups,
                     )
                 )
+                if attn_enabled[i]:
+                    attn.append(
+                        attn_klass(
+                            block_out,
+                            **attn_kwargs,
+                        )
+                    )
+                else:
+                    attn.append(None)
                 block_in = block_out
 
             downsample = None
@@ -128,19 +140,27 @@ class Encoder(nn.Module):
 
             down = nn.Module()
             down.block = block
+            down.attn = attn
             down.downsample = downsample
             self.down.append(down)
 
         self.mid = nn.ModuleList()
         for _ in range(num_resnet_blocks):
-            self.mid.append(
-                resnet_klass(
-                    block_in,
-                    block_in,
-                    cond_dim=current_res if attn_mid_enabled else None,
-                    groups=resnet_groups,
-                )
+            block = resnet_klass(
+                block_in,
+                block_in,
+                groups=resnet_groups,
             )
+            attn = None
+            if attn_mid_enabled:
+                attn = attn_klass(
+                    block_in,
+                    **attn_kwargs,
+                )
+            mid = nn.Module()
+            mid.block = block
+            mid.attn = attn
+            self.mid.append(mid)
 
         self.norm_out = nn.GroupNorm(32, block_in)
         self.gelu = nn.GELU()
@@ -155,23 +175,25 @@ class Encoder(nn.Module):
     def forward(self, x):
         x = self.init_conv(x)
         for i in range(self.num_resolutions):
-            for resnet in self.down[i].block:
-                if hasattr(resnet, "cross_attn"):
-                    context = rearrange(x, "b c h w -> b h w c")
-                    context, _ = pack([x], "b * c")
-                    x = resnet(x, cond=context)
-                else:
-                    x = resnet(x)
+            for resnet, attn in zip(self.down[i].block, self.down[i].attn):
+                x = resnet(x)
+                if attn is not None:
+                    x = rearrange(x, "b c h w -> b h w c")
+                    x, ps = pack([x], "b * c")
+                    x = attn(x) + x
+                    (x,) = unpack(x, ps, "b * c")
+                    x = rearrange(x, "b h w c -> b c h w")
             if self.down[i].downsample is not None:
                 x = self.down[i].downsample(x)
 
-        for resnet in self.mid:
-            if hasattr(resnet, "cross_attn"):
-                context = rearrange(x, "b c h w -> b h w c")
-                context, _ = pack([x], "b * c")
-                x = resnet(x, cond=context)
-            else:
-                x = resnet(x)
+        for layer in self.mid:
+            x = layer.block(x)
+            if layer.attn is not None:
+                x = rearrange(x, "b c h w -> b h w c")
+                x, ps = pack([x], "b * c")
+                x = layer.attn(x) + x
+                (x,) = unpack(x, ps, "b * c")
+                x = rearrange(x, "b h w c -> b c h w")
 
         x = self.norm_out(x)
         x = self.gelu(x)
@@ -210,6 +232,7 @@ class Decoder(nn.Module):
         resnet_klass = partial(
             ResnetBlock, use_flash_attn=use_flash_attn, **attn_kwargs
         )
+        attn_klass = Attention if not use_flash_attn else FlashAttention
 
         upsample_klass = (
             Upsample if not pixel_shuffle_upsample else PixelShuffleUpsample
@@ -229,28 +252,44 @@ class Decoder(nn.Module):
 
         self.mid = nn.ModuleList()
         for _ in range(num_resnet_blocks):
-            self.mid.append(
-                resnet_klass(
-                    block_in,
-                    block_in,
-                    cond_dim=current_res if attn_mid_enabled else None,
-                    groups=resnet_groups,
-                )
+            block = resnet_klass(
+                block_in,
+                block_in,
+                groups=resnet_groups,
             )
+            attn = None
+            if attn_mid_enabled:
+                attn = attn_klass(
+                    block_in,
+                    **attn_kwargs,
+                )
+            mid = nn.Module()
+            mid.block = block
+            mid.attn = attn
+            self.mid.append(mid)
 
         self.up = nn.ModuleList()
         for i in reversed(range(self.num_resolutions)):
             block = nn.ModuleList()
+            attn = nn.ModuleList()
             block_out = in_dim * dim_mults[i]
             for _ in range(num_resnet_blocks + 1):
                 block.append(
                     resnet_klass(
                         block_in,
                         block_out,
-                        cond_dim=current_res if attn_enabled[i] else None,
                         groups=resnet_groups,
                     )
                 )
+                if attn_enabled[i]:
+                    attn.append(
+                        attn_klass(
+                            block_out,
+                            **attn_kwargs,
+                        )
+                    )
+                else:
+                    attn.append(None)
                 block_in = block_out
 
             upsample = None
@@ -260,6 +299,7 @@ class Decoder(nn.Module):
 
             up = nn.Module()
             up.block = block
+            up.attn = attn
             up.upsample = upsample
 
             self.up.insert(0, up)
@@ -276,23 +316,24 @@ class Decoder(nn.Module):
 
     def forward(self, z):
         z = self.init_conv(z)
-
-        for resnet in self.mid:
-            if hasattr(resnet, "cross_attn"):
-                context = rearrange(z, "b c h w -> b h w c")
-                context, _ = pack([z], "b * c")
-                z = resnet(z, cond=z)
-            else:
-                z = resnet(z)
+        for layer in self.mid:
+            z = layer.block(z)
+            if layer.attn is not None:
+                z = rearrange(z, "b c h w -> b h w c")
+                z, ps = pack([z], "b * c")
+                z = layer.attn(z) + z
+                (z,) = unpack(z, ps, "b * c")
+                z = rearrange(z, "b h w c -> b c h w")
 
         for i in reversed(range(self.num_resolutions)):
-            for resnet in self.up[i].block:
-                if hasattr(resnet, "cross_attn"):
-                    context = rearrange(z, "b c h w -> b h w c")
-                    context, _ = pack([z], "b * c")
-                    z = resnet(z, cond=context)
-                else:
-                    z = resnet(z)
+            for (resnet, attn) in zip(self.up[i].block, self.up[i].attn):
+                z = resnet(z)
+                if attn is not None:
+                    z = rearrange(z, "b c h w -> b h w c")
+                    z, ps = pack([z], "b * c")
+                    z = attn(z) + z
+                    (z,) = unpack(z, ps, "b * c")
+                    z = rearrange(z, "b h w c -> b c h w")
             if self.up[i].upsample is not None:
                 z = self.up[i].upsample(z)
 
