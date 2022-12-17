@@ -16,7 +16,6 @@ from torch.special import expm1
 import torchvision.transforms as T
 from xformers.ops import (
     memory_efficient_attention,
-    MemoryEfficientAttentionFlashAttentionOp,
 )
 
 import kornia.augmentation as K
@@ -666,12 +665,10 @@ class FlashAttention(nn.Module):
 
         k, v = kv.unbind(dim=-3)
 
-        q = q.to(torch.float16)
-        k = k.to(torch.float16)
-        v = v.to(torch.float16)
-        out = memory_efficient_attention(
-            q, k, v, scale=self.scale, op=MemoryEfficientAttentionFlashAttentionOp
-        )
+        q = q.to(torch.float32)
+        k = k.to(torch.float32)
+        v = v.to(torch.float32)
+        out = memory_efficient_attention(q, k, v, scale=self.scale)
 
         out = rearrange(out, "b n h d -> b n (h d)", b=b, h=self.heads)
         return self.to_out(out.to(x.dtype))
@@ -971,12 +968,10 @@ class FlashCrossAttention(nn.Module):
 
         k, v = kv.unbind(dim=-3)
 
-        q = q.to(torch.float16)
-        k = k.to(torch.float16)
-        v = v.to(torch.float16)
-        out = memory_efficient_attention(
-            q, k, v, scale=self.scale, op=MemoryEfficientAttentionFlashAttentionOp
-        )
+        q = q.to(torch.float32)
+        k = k.to(torch.float32)
+        v = v.to(torch.float32)
+        out = memory_efficient_attention(q, k, v, scale=self.scale)
 
         out = rearrange(out, "b n h d -> b n (h d)", b=b, h=self.heads)
         return self.to_out(out.to(x.dtype))
