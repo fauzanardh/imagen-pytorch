@@ -665,9 +665,9 @@ class FlashAttention(nn.Module):
 
         k, v = kv.unbind(dim=-3)
 
-        q = q.to(torch.float32)
-        k = k.to(torch.float32)
-        v = v.to(torch.float32)
+        q = q.to(torch.float16)
+        k = k.to(torch.float16)
+        v = v.to(torch.float16)
         out = memory_efficient_attention(q, k, v, scale=self.scale)
 
         out = rearrange(out, "b n h d -> b n (h d)", b=b, h=self.heads)
@@ -968,9 +968,9 @@ class FlashCrossAttention(nn.Module):
 
         k, v = kv.unbind(dim=-3)
 
-        q = q.to(torch.float32)
-        k = k.to(torch.float32)
-        v = v.to(torch.float32)
+        q = q.to(torch.float16)
+        k = k.to(torch.float16)
+        v = v.to(torch.float16)
         out = memory_efficient_attention(q, k, v, scale=self.scale)
 
         out = rearrange(out, "b n h d -> b n (h d)", b=b, h=self.heads)
