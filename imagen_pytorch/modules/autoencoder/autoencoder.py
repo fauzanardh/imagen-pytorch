@@ -1,5 +1,6 @@
 import numpy as np
 from functools import partial
+from einops import rearrange, pack
 
 import torch
 from torch import nn
@@ -63,6 +64,8 @@ class Encoder(nn.Module):
         in_channels=3,
         num_resnet_blocks=2,
         resnet_groups=8,
+        attn_enabled=(False, True, True, True),
+        attn_mid_enabled=False,
         attn_heads=8,
         attn_dim_head=64,
         cosine_sim_attn=False,
@@ -112,6 +115,7 @@ class Encoder(nn.Module):
                     resnet_klass(
                         block_in,
                         block_out,
+                        cond_dim=current_res if attn_enabled[i] else None,
                         groups=resnet_groups,
                     )
                 )
@@ -133,6 +137,7 @@ class Encoder(nn.Module):
                 resnet_klass(
                     block_in,
                     block_in,
+                    cond_dim=current_res if attn_mid_enabled else None,
                     groups=resnet_groups,
                 )
             )
@@ -151,12 +156,22 @@ class Encoder(nn.Module):
         x = self.init_conv(x)
         for i in range(self.num_resolutions):
             for resnet in self.down[i].block:
-                x = resnet(x)
+                if hasattr(resnet, "cross_attn"):
+                    context = rearrange(x, "b c h w -> b h w c")
+                    context, _ = pack([x], "b * c")
+                    x = resnet(x, cond=context)
+                else:
+                    x = resnet(x)
             if self.down[i].downsample is not None:
                 x = self.down[i].downsample(x)
 
         for resnet in self.mid:
-            x = resnet(x)
+            if hasattr(resnet, "cross_attn"):
+                context = rearrange(x, "b c h w -> b h w c")
+                context, _ = pack([x], "b * c")
+                x = resnet(x, cond=context)
+            else:
+                x = resnet(x)
 
         x = self.norm_out(x)
         x = self.gelu(x)
@@ -174,6 +189,8 @@ class Decoder(nn.Module):
         in_channels=3,
         num_resnet_blocks=2,
         resnet_groups=8,
+        attn_enabled=(False, True, True, True),
+        attn_mid_enabled=False,
         attn_heads=8,
         attn_dim_head=64,
         cosine_sim_attn=False,
@@ -216,6 +233,7 @@ class Decoder(nn.Module):
                 resnet_klass(
                     block_in,
                     block_in,
+                    cond_dim=current_res if attn_mid_enabled else None,
                     groups=resnet_groups,
                 )
             )
@@ -229,6 +247,7 @@ class Decoder(nn.Module):
                     resnet_klass(
                         block_in,
                         block_out,
+                        cond_dim=current_res if attn_enabled[i] else None,
                         groups=resnet_groups,
                     )
                 )
@@ -259,11 +278,21 @@ class Decoder(nn.Module):
         z = self.init_conv(z)
 
         for resnet in self.mid:
-            z = resnet(z)
+            if hasattr(resnet, "cross_attn"):
+                context = rearrange(z, "b c h w -> b h w c")
+                context, _ = pack([z], "b * c")
+                z = resnet(z, cond=z)
+            else:
+                z = resnet(z)
 
         for i in reversed(range(self.num_resolutions)):
             for resnet in self.up[i].block:
-                z = resnet(z)
+                if hasattr(resnet, "cross_attn"):
+                    context = rearrange(z, "b c h w -> b h w c")
+                    context, _ = pack([z], "b * c")
+                    z = resnet(z, cond=context)
+                else:
+                    z = resnet(z)
             if self.up[i].upsample is not None:
                 z = self.up[i].upsample(z)
 
@@ -285,6 +314,8 @@ class AutoEncoderKL(nn.Module):
         in_channels=3,
         num_resnet_blocks=2,
         resnet_groups=8,
+        attn_enabled=(False, True, True, True),
+        attn_mid_enabled=False,
         attn_heads=8,
         attn_dim_head=64,
         cosine_sim_attn=False,
@@ -303,6 +334,7 @@ class AutoEncoderKL(nn.Module):
             in_channels=in_channels,
             num_resnet_blocks=num_resnet_blocks,
             resnet_groups=resnet_groups,
+            attn_enabled=attn_enabled,
             attn_heads=attn_heads,
             attn_dim_head=attn_dim_head,
             cosine_sim_attn=cosine_sim_attn,
@@ -318,6 +350,7 @@ class AutoEncoderKL(nn.Module):
             in_channels=in_channels,
             num_resnet_blocks=num_resnet_blocks,
             resnet_groups=resnet_groups,
+            attn_enabled=attn_enabled,
             attn_heads=attn_heads,
             attn_dim_head=attn_dim_head,
             cosine_sim_attn=cosine_sim_attn,
